@@ -1,0 +1,14 @@
+[config]
+
+name="YoudooSkeleton"
+binary_type="local"
+binary="res://android/plugins/youdoo/godot-youdoo-skeleton.jar"
+
+[dependencies]
+
+local=["res://android/plugins/youdoo/YoudooAndroidLibrary-release.aar", "res://android/plugins/youdoo/AndroidCutoutLibrary-release.aar", "res://android/plugins/youdoo/RCU_common-release.aar", "res://android/plugins/youdoo/Screencaplib-release.aar", "res://android/plugins/youdoo/TDAnalytics.aar", "res://android/plugins/youdoo/TDCore.aar", "res://android/plugins/youdoo/youdoo_camframe-release.aar"]
+remote=["org.jetbrains.kotlin:kotlin-stdlib:2.1.21"]
+
+[plugin]
+
+name="com.youdoo.godot.YoudooSkeletonPlugin"

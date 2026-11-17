@@ -1,0 +1,308 @@
+Godot Engine v4.6.3.stable.official.7d41c59c4 - https://godotengine.org
+
+================================================================
+pose-snake core tests (pure GDScript rules, headless)
+Godot 4.6.3-stable (official)
+================================================================
+[suite] config
+  PASS  world w = 3x3 screens
+  PASS  world h = 3x3 screens
+  PASS  round duration 120 s
+  PASS  round mode timed
+  PASS  8 ranked players
+  PASS  7 AI
+  PASS  last call at 10 s
+  PASS  start segments
+  PASS  seg dist
+  PASS  radius
+  PASS  base speed
+  PASS  grow per food
+  PASS  grow per big food
+  PASS  grow per kill (legacy)
+  PASS  wall pad
+  PASS  slowdown strength
+  PASS  slowdown scale
+  PASS  turn rate
+  PASS  turn reverse boost
+  PASS  collide head on cos
+  PASS  collide head radius
+  PASS  equal head-on both die
+  PASS  food target count
+  PASS  food radius
+  PASS  food spawn margin
+  PASS  food min dist from snake
+  PASS  big food chance
+  PASS  food eat padding
+  PASS  food spawn cooldown
+  PASS  food spawn per batch
+  PASS  food trim extra
+  PASS  food scatter max
+  PASS  powerup target count
+  PASS  boost speed mul
+  PASS  magnet radius
+  PASS  powerups enabled
+  PASS  ai skill min
+  PASS  ai skill max
+  PASS  ai speed jitter
+  PASS  ai wander radius
+  PASS  ai avoid radius
+  PASS  ai probe dist
+  PASS  ai attack ratio
+  PASS  ai food fov
+  PASS  ai difficulty level
+  PASS  ai mistake rate
+  PASS  ai reaction max
+  PASS  ai self hit skip
+  PASS  ai self hit radius mul
+  PASS  style pool size
+  PASS  head style pool size
+  PASS  neutral style food weight
+  PASS  hunt player focus
+  PASS  leader max bonus
+  PASS  pose deadzone
+  PASS  pose speed min
+  PASS  pose speed max
+  PASS  pose speed near
+  PASS  pose speed far
+  PASS  pose lost timeout
+  PASS  player immunity
+  PASS  respawn freeze
+  PASS  radius@16
+  PASS  radius@40
+  PASS  radius@68
+  PASS  radius@120
+  PASS  radius@500 caps
+  PASS  radius girth_max 1 = base
+  PASS  radius girth disabled
+  PASS  pressure lvl1/p1
+  PASS  pressure lvl0.85/p1
+  PASS  pressure lvl0.5/p1
+  PASS  pressure lvl0.85/p0
+  PASS  tuning pressure default
+  PASS  low_end food count
+  PASS  low_end particle cap
+  PASS  low_end powerups
+  PASS  profile name stored
+  PASS  desktop restores food
+  PASS  desktop restores particles
+[suite] config done in 22 ms
+[suite] config/formulas
+  PASS  speed@16
+  PASS  speed@21
+  PASS  speed@76
+  PASS  speed@136
+  PASS  speed@76 speedMul 1.1
+  PASS  speed@76 pose 1.8
+  PASS  speed@76 boost
+  PASS  pose speed clamped to 1.80
+  PASS  turn cap PI
+  PASS  heading after one frame
+  PASS  turn cap PI/2
+  PASS  turn cap PI/4
+  FAIL  turn cap small diff   <- got 0.100000000000 want 0.143244953186
+  PASS  turn cap with AI ease
+  PASS  turn converges
+  PASS  turn lands on target
+  PASS  kill 16 player
+  PASS  kill 16 ai
+  PASS  kill 60 player
+  PASS  kill 60 ai
+  PASS  kill 200 player
+  PASS  kill 200 ai
+  PASS  kill disabled player
+  PASS  kill disabled ai
+  PASS  big food radius
+  PASS  eat radius 22+24*0.82
+[suite] config/formulas done in 8 ms
+[suite] input
+  PASS  angle to the right is 0
+  PASS  valid pose frame
+  PASS  not a hold frame
+  PASS  deadzone passed -> confidence 1
+  PASS  dist_n 1.0 -> max speed
+  PASS  dist_n reported
+  PASS  usable
+  PASS  wrist up is -PI/2
+  PASS  wrist left is PI
+  PASS  wrist down is +PI/2
+  PASS  good frame angle
+  PASS  dead zone keeps the pose valid
+  PASS  dead zone holds the last angle
+  PASS  dead zone reports confidence 0
+  PASS  dead zone reported
+  PASS  speed stays high inside the dead zone
+  PASS  dist_n 0.30 -> min speed
+  PASS  dist_n 0.75 -> max speed
+  PASS  dist_n midway -> mid speed
+  PASS  far reach clamps to max
+  PASS  smoothing start
+  PASS  slew limits one frame
+  PASS  speed keeps rising
+  PASS  speed rose
+  PASS  dropout inside the window holds
+  PASS  held input is still usable
+  PASS  held input is not fresh
+  PASS  held angle is the last good one
+  PASS  hold confidence is 0
+  PASS  dropout past the timeout releases
+  PASS  stale input is unusable
+  PASS  direct angle passed through
+  PASS  direct speed passed through
+  PASS  direct angle usable
+  PASS  direct speed clamps to max
+  PASS  kb right
+  PASS  kb down
+  PASS  kb left
+  PASS  kb up
+  PASS  kb right+down
+  PASS  kb left+down
+  PASS  kb left+up
+  PASS  kb right+up
+  PASS  kb opposite cancels
+  PASS  kb empty mask
+  PASS  kb idle produces nothing
+  PASS  kb accepts a direction
+  PASS  kb publishes while held
+  PASS  kb input is valid
+  PASS  kb keeps speed at 1.0
+  PASS  kb angle
+  PASS  kb hold window
+  PASS  kb hold expired after 4 s
+  PASS  cancelling dirs keep the last angle
+  PASS  cleared input is unusable
+  PASS  cleared speed is 1
+  PASS  copy angle
+  PASS  copy speed
+  PASS  copy confidence
+[suite] input done in 17 ms
+[suite] snake
+  PASS  reset length
+  PASS  alive after reset
+  PASS  head at reset point x
+  PASS  head at reset point y
+  PASS  body[1] one seg behind
+  PASS  body[15] fifteen segs behind
+  PASS  reset speed is base
+  PASS  peak starts at length
+  PASS  radius at 16
+  PASS  grow 5
+  PASS  peak tracks growth
+  PASS  tail keeps extending
+  PASS  speed after growth
+  PASS  fraction 0.6 does not grow
+  PASS  fraction carry
+  PASS  fraction 1.2 grows one
+  PASS  fraction carry left
+  PASS  negative fraction ignored
+  PASS  radius 16
+  PASS  length 120
+  PASS  radius 120 (max girth)
+  PASS  radius with girth slider at 1
+  PASS  radius back to max
+  PASS  head advanced one frame
+  PASS  links never exceed seg_dist
+  PASS  one frame turn is capped
+  PASS  heading moved by the cap
+  PASS  head now moved off the x axis
+  PASS  turn_ease 0.5 halves the cap
+  FAIL  wobble offsets the target   <- got 0.100000000000 want 0.143244953186
+  FAIL  wobble turns the heading   <- got 0.100000000000 want 0.143244953186
+  PASS  frozen snake does not move
+  PASS  frozen snake takes the heading directly
+  PASS  frozen snake reports no turn
+  PASS  frozen snake is immune
+  PASS  frozen snake is frozen
+  PASS  unfrozen after the window
+  PASS  hit wall on the left
+  PASS  hit wall on the right
+  PASS  hit wall at the bottom
+  PASS  clamped to wall pad
+  PASS  inside the world after clamp
+  PASS  head inside body[20] is a self hit
+  PASS  AI forgiveness: same spot with skip 12 still hits
+  PASS  neck nodes inside skip are ignored
+  PASS  neck nodes count when skip is lowered
+  PASS  fat snake hits at 20 px
+  PASS  thin snake misses at 20 px
+  PASS  no boost at start
+  PASS  boost left
+  PASS  same buff does not shrink
+  PASS  magnet active
+  PASS  boost ticks down
+  PASS  magnet ticks down
+  PASS  buff floors at zero
+  PASS  buff inactive at zero
+  PASS  clear_buffs drops everything
+  PASS  respawn clears buffs
+  PASS  render points match body
+  PASS  render head is the real head
+  PASS  scatter stride for 20 nodes
+  PASS  scatter positions count
+  PASS  scatter stride caps the count
+  PASS  scatter count stays under the cap
+[suite] snake done in 21 ms
+[suite] collisions
+  PASS  wall death
+  PASS  wall death respawn timer
+  PASS  wall death counts as a death
+  PASS  wall death scatters food
+  PASS  wall death scatters one pellet per node
+  PASS  wall death credits nobody
+  PASS  no body left behind
+  PASS  self collision kills
+  PASS  self collision is a death
+  PASS  self collision credits nobody
+  PASS  AI skips the first 12 nodes
+  PASS  AI survived
+  PASS  equal head-on kills the first
+  PASS  equal head-on kills the second
+  PASS  equal head-on gives no kill
+  PASS  both deaths counted
+  PASS  both bodies scattered
+  PASS  longer snake survives a head-on
+  PASS  shorter snake dies in a head-on
+  PASS  head-on absorb counts a kill
+  PASS  head-on absorb grows the winner
+  PASS  winner gets absorb immunity
+  PASS  game kill counter
+  PASS  rear-ending snake dies
+  PASS  rammed snake survives
+  PASS  rammed snake gets the kill
+  PASS  AI kill reward is discounted
+  PASS  head into a body kills
+  PASS  body owner survives
+  PASS  body owner credited with the kill
+  PASS  immune snake cannot die
+  PASS  immune snake blocks the pair
+  PASS  frozen snake ignores walls
+  PASS  loser still dies
+  PASS  legacy fixed growth (player x2)
+  PASS  kill via kill_snake rewards
+  PASS  kill via kill_snake grows
+  PASS  corpse cannot die twice
+  PASS  corpse did not scatter again
+[suite] collisions done in 32 ms
+[suite] food
+  PASS  300 spawns stay inside the spawn margin
+  PASS  300 spawns are finite
+  PASS  spawns are flagged as not scattered
+  PASS  spawns keep min distance from snakes
+  PASS  eating grows one node
+  PASS  eating is counted
+  PASS  player score for a pellet
+  PASS  pellet pulse
+  PASS  pellet removed from the pool
+  PASS  eat counter
+  PASS  big pellet radius
+  PASS  big pellet grows three
+  PASS  big pellet scores thirty
+  PASS  eat radius
+  PASS  pellet just inside the radius is eaten
+  PASS  pellet just outside the radius survives
+  PASS  frozen snake does not eat
+  PASS  frozen snake keeps the pellet
+  PASS  corpse scatters one pellet per node
+  PASS  scattered pellets flagged
+  PASS  scattered pellets keep the snake colour
+  PASS  scattered pellets are finite
+  PASS  scatter count capped

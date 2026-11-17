@@ -1,0 +1,25 @@
+# --- Godot -------------------------------------------------------------
+.godot/
+*.translation
+export_credentials.cfg
+
+# --- build outputs -----------------------------------------------------
+build/
+*.apk
+*.aab
+*.apk.idsig
+
+# --- evidence: screenshots / logs / traces (hundreds of MB) -----------
+evidence/
+_readyfix-backup/
+
+# --- Android build intermediates --------------------------------------
+android/build/
+android/_work/
+android/.gradle/
+android/local.properties
+
+# --- OS / editor -------------------------------------------------------
+Thumbs.db
+.DS_Store
+*.swp
