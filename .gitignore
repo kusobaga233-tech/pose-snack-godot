@@ -23,3 +23,8 @@ android/local.properties
 Thumbs.db
 .DS_Store
 *.swp
+
+# --- stray temp files ------------------------------------------------
+.tmp_*
+*.tmp
+
