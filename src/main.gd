@@ -370,6 +370,9 @@ var _audio_on := true
 var pause_focus := 0
 ## Settlement focus: 0 = 再来一局, 1 = 返回模式选择.
 var settle_focus := 0
+## Last focus the settlement stage was redrawn for (see the `stage.is_animating`
+## block in `_process`).
+var _stage_focus_drawn := -1
 
 ## READY slot state, index 0/1. Parallel arrays so the per-frame path allocates
 ## nothing; ps_hud reads the same Array objects.
@@ -608,11 +611,26 @@ var _cap_play_frames := 0
 var _cap_play_fps_sum := 0.0
 var _cap_play_fps_min := 999.0
 var _cap_play_draw_sum := 0.0
+## Settlement window of the flow capture: the web-parity frames + the draw/fps
+## numbers for the settle screen (the gate measures PLAY; this is evidence).
+var _cap_settle_frames := 0
+var _cap_settle_fps_sum := 0.0
+var _cap_settle_fps_min := 999.0
+var _cap_settle_draw_sum := 0.0
+var _cap_settle_prim := 0
+var _cap_settle_started := false
+## Wall-clock frame time of the settle window. `--fixed-fps` makes `delta` a
+## constant, so the stress-style ms measurement is the only honest cost number.
+var _cap_settle_last_usec := 0
+var _cap_settle_ms_sum := 0.0
+var _cap_settle_ms_max := 0.0
 ## Pause / settle leg of the flow capture (B1 evidence frames).
 var _b1_t := 0.0
 # --capture-remote / --remote-probe timeline
 var _remote_t := 0.0
 var _remote_step := 0
+## The settle-rise skip has been fed once (OK during the 1.1 s rise).
+var _remote_skip_sent := false
 var _remote_play_t := 0.0
 var _remote_previewed := false
 var _remote_done := false
@@ -1172,7 +1190,9 @@ func _process(delta: float) -> void:
 		MODE_SELECT:
 			pass
 		MODE_SETTLE:
-			stage.t = minf(stage.t + real_dt, 3.0)
+			# The stage owns its own clock: growth + camera rise share one 1.1 s
+			# ease-out and stop at 3 s, so the settled frame is static.
+			stage.tick(real_dt)
 
 	if mode == MODE_PLAY or mode == MODE_SELECT or mode == MODE_READY:
 		fx.update(real_dt)
@@ -1186,7 +1206,12 @@ func _process(delta: float) -> void:
 	if hud != null:
 		hud.queue_redraw()
 	if stage != null and stage.visible:
-		stage.queue_redraw()
+		# The settled score screen is a still: redraw it only while it animates or
+		# when the remote focus moved. Rebuilding the eight skin columns and the
+		# strip type every frame was the whole settlement frame budget.
+		if stage.is_animating() or stage.focus != _stage_focus_drawn:
+			stage.queue_redraw()
+		_stage_focus_drawn = stage.focus
 	if _tuning_panel != null and _tuning_panel.open:
 		_tuning_panel.time = now
 		_tuning_panel.queue_redraw()
@@ -3117,9 +3142,8 @@ func _capture_flow_tick(dt: float) -> void:
 				player_count])
 			_b1_t = 0.0
 			if _capture_2p:
-				print("[capture] flow: mode_select -> ready -> countdown -> play")
-				print("[capture] done")
-				get_tree().quit(0)
+				# Keep walking into the 2P settlement (new web-parity evidence).
+				_cap_flow_step = 20
 			else:
 				# Arena-only frame: same HUD, snakes hidden (capture tooling only).
 				_set_hide_snakes(true)
@@ -3147,17 +3171,135 @@ func _capture_flow_tick(dt: float) -> void:
 			if not _capture_2p:
 				_save_png("res://evidence/ui-pause-1024.png")
 			_toggle_pause("capture")
-			# Real end-of-round path, then the settlement stage.
+			# Real end-of-round path, then the settlement stage. The final lengths
+			# are staged to a web-reference-like spread so all eight columns fit
+			# (capture-only evidence data, see `_stage_settle_showcase`).
+			_stage_settle_showcase(1 if not _capture_2p else 2)
 			game.finish_round()
 			_enter_settle()
+			_settle_cap_begin()
+	# ---- settlement rise, 1P: mid-rise frame at 0.82 s of the 1.1 s rise ----
 	elif _cap_flow_step == 10:
 		_b1_t += dt
-		if _b1_t >= 1.0:
+		if _b1_t >= 0.82:
 			_cap_flow_step = 11
+			_save_png("res://evidence/settle-webparity-mid-1920.png")
+			if stage != null:
+				print("[capture] settle mid-rise t=%.2fs lift=%.0fpx settled=%s lanes=%d" % [
+					stage.t, stage.lift, str(stage.settled), stage.rows.size()])
+			_cap_settle_started = false
+	# ---- settlement hold, 1P: final frames + the settle draw/fps readout ----
+	elif _cap_flow_step == 11:
+		_b1_t += dt
+		# Measure only the settled hold (t >= 1.15 s): the one-off glyph/first-draw
+		# cost of the title+length type belongs to the transition, not the screen.
+		if _b1_t >= 1.15:
+			if not _cap_settle_started:
+				_cap_settle_started = true
+				_settle_cap_begin()
+			_cap_settle_sample()
+		if _b1_t >= 1.75:
+			_cap_flow_step = 13
+			_settle_cap_report("1P")
 			_save_png("res://evidence/b2-settle-1920.png")
+			_save_png("res://evidence/settle-webparity-1920.png")
 			print("[capture] flow: mode_select -> ready -> countdown -> play -> pause -> settle")
 			print("[capture] done")
 			get_tree().quit(0)
+	# ---- 2P settlement (new web-parity evidence) ----
+	elif _cap_flow_step == 20:
+		_b1_t += dt
+		if _b1_t >= 0.35:
+			_cap_flow_step = 21
+			_b1_t = 0.0
+			_stage_settle_showcase(2)
+			game.finish_round()
+			_enter_settle()
+			_settle_cap_begin()
+	elif _cap_flow_step == 21:
+		_b1_t += dt
+		if _b1_t >= 1.15:
+			if not _cap_settle_started:
+				_cap_settle_started = true
+				_settle_cap_begin()
+			_cap_settle_sample()
+		if _b1_t >= 1.75:
+			_cap_flow_step = 22
+			_settle_cap_report("2P")
+			_save_png("res://evidence/settle-webparity-2p.png")
+			print("[capture] flow: mode_select -> ready -> countdown -> play -> settle (2P)")
+			print("[capture] done")
+			get_tree().quit(0)
+
+
+## --capture-flow only: stage a final length spread close to the web reference
+## (24 / 21 / 21 / 19 / 19 / 18 / 18 / 16 from its ~4 s round). With a real
+## 2-minute spread (e.g. 67 vs 17) the web's own 1.55-screen winner law pushes
+## the short columns off the bottom of the frame — that is the shipped behaviour,
+## but it makes the parity crop unreadable. This is evidence data, not a rule
+## change: normal rounds settle with the real `body.size()`. It also pins a
+## historical best above the round peak so the 最长 / 历史最长 split is visible.
+func _stage_settle_showcase(players: int) -> void:
+	if game == null or game.snakes.is_empty():
+		return
+	var want := [24, 21, 21, 19, 19, 18, 18, 16]
+	if players >= 2:
+		# 2P: both humans in the top two, no ties, so both ranks are predictable.
+		want = [24, 21, 20, 19, 18, 17, 16, 15]
+	var i := 0
+	for s in game.snakes:
+		var n: int = int(want[mini(i, want.size() - 1)])
+		var col := float(i % 4) - 1.5
+		var row := float(i / 4) - 0.5
+		s.alive = true
+		s.reset(cfg.world.w * 0.5 + 420.0 * col, cfg.world.h * 0.5 + 360.0 * row, 0.0, n)
+		s.kills = 0
+		s.deaths = 0
+		s.peak_length = n
+		s.food_eaten = maxi(0, n - int(cfg.snake.start_segments))
+		i += 1
+	game.best_length = 31
+	print("[capture] settle showcase: lengths=%s best=%d (staged evidence data)" % [
+		str(want), int(game.best_length)])
+
+
+## Settlement performance window (evidence only; the gate measures PLAY).
+func _settle_cap_begin() -> void:
+	_cap_settle_frames = 0
+	_cap_settle_fps_sum = 0.0
+	_cap_settle_fps_min = 999.0
+	_cap_settle_draw_sum = 0.0
+	_cap_settle_prim = 0
+	_cap_settle_last_usec = 0
+	_cap_settle_ms_sum = 0.0
+	_cap_settle_ms_max = 0.0
+
+
+func _cap_settle_sample() -> void:
+	var now := Time.get_ticks_usec()
+	if _cap_settle_last_usec > 0:
+		var ms := float(now - _cap_settle_last_usec) / 1000.0
+		_cap_settle_frames += 1
+		_cap_settle_ms_sum += ms
+		_cap_settle_ms_max = maxf(_cap_settle_ms_max, ms)
+		_cap_settle_fps_sum += 1000.0 / maxf(0.001, ms)
+		_cap_settle_fps_min = minf(_cap_settle_fps_min, 1000.0 / maxf(0.001, ms))
+		_cap_settle_draw_sum += float(Performance.get_monitor(
+			Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
+		_cap_settle_prim = int(Performance.get_monitor(
+			Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME))
+	_cap_settle_last_usec = now
+
+
+func _settle_cap_report(tag: String) -> void:
+	var n := maxf(1.0, float(_cap_settle_frames))
+	var avg_ms := _cap_settle_ms_sum / n
+	print("[capture] settle %s fps_avg=%.1f fps_min=%.1f ms_avg=%.2f ms_max=%.2f draw_avg=%.1f draw_last=%d prim=%d frames=%d lift=%.0fpx lanes=%d" % [
+		tag, _cap_settle_fps_sum / n, _cap_settle_fps_min, avg_ms, _cap_settle_ms_max,
+		_cap_settle_draw_sum / n,
+		int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)),
+		_cap_settle_prim, _cap_settle_frames,
+		stage.lift if stage != null else 0.0, stage.rows.size() if stage != null else 0])
 
 
 ## --capture-shake: the before/after evidence for the screen-shake retune. Runs a
@@ -5594,11 +5736,16 @@ func _capture_remote_tick(dt: float) -> void:
 				_remote_play_t = 0.0
 		9:
 			_remote_play_t += dt
-			if _remote_play_t > 0.5:
+			if not _remote_skip_sent and _remote_play_t > 0.4:
+				# OK during the 1.1 s camera rise must skip it in place (the same
+				# press must NOT be swallowed as "wait for the animation").
+				_remote_skip_sent = true
+				_feed_tap(KEY_ENTER)
+				print("[capture] remote: OK during the settle rise skipped it")
+			if _remote_play_t > 1.0:
 				_remote_step = 10
 				_save_png("res://evidence/remote-05-settle.png")
-				_feed_tap(KEY_RIGHT)   # focus 返回模式选择
-				_feed_tap(KEY_ENTER)   # OK -> MODE_SELECT
+				_feed_tap(KEY_BACK)    # settled settle: BACK -> MODE_SELECT
 		10:
 			if mode == MODE_SELECT:
 				_remote_done = true
@@ -5663,22 +5810,34 @@ func _remote_probe_tick(dt: float) -> void:
 		10:
 			if mode == MODE_PLAY:
 				_remote_step = 11
+				_remote_play_t = 0.0
 				game.finish_round()    # tooling: jump to settlement
 		11:
-			if mode == MODE_SETTLE:
+			_remote_play_t += dt
+			if mode == MODE_SETTLE and not _remote_skip_sent and _remote_play_t > 0.3:
+				# OK during the camera rise must skip it in place; a second press
+				# (RIGHT + OK below) then navigates, so nothing is swallowed.
+				_remote_skip_sent = true
 				_remote_step = 12
+				_feed_tap(KEY_ENTER)
+				print("[probe] settle rise: OK skip fed at t=%.2fs" % _remote_play_t)
+		12:
+			_remote_play_t += dt
+			if stage != null and stage.settled and _remote_play_t > 0.9:
+				_remote_step = 13
+				print("[probe] settle rise skipped -> settled=%s (OK)" % str(stage.settled))
 				_feed_tap(KEY_RIGHT)   # focus 返回模式选择
 				_feed_tap(KEY_ENTER)   # OK -> mode select
-		12:
+		13:
 			if mode == MODE_SELECT:
-				_remote_step = 13
+				_remote_step = 14
 				_feed_tap(KEY_LEFT)
 				_feed_tap(KEY_ENTER)   # READY again (for the Android BACK test)
-		13:
-			if mode == MODE_READY:
-				_remote_step = 14
-				_feed_tap(KEY_BACK)    # Android KEYCODE_BACK path -> mode select
 		14:
+			if mode == MODE_READY:
+				_remote_step = 15
+				_feed_tap(KEY_BACK)    # Android KEYCODE_BACK path -> mode select
+		15:
 			if mode == MODE_SELECT:
 				_remote_done = true
 				print("[probe] PASS: mode_select/ready/pause/countdown/settle all driven by remote keys")
@@ -6284,7 +6443,22 @@ func _act_pause(action: int) -> void:
 
 
 ## MODE_SETTLE: 再来一局 / 返回模式选择; BACK always goes to mode select.
+##
+## The camera-rise is skippable: OK finishes it in place (the two actions become
+## live immediately, focus already on 再来一局) and BACK finishes it **and**
+## leaves in the same press, so BACK on the settlement is always one press —
+## "skip" never turns into a press the player has to repeat to get out.
 func _act_settle(action: int) -> void:
+	if stage != null and not stage.settled:
+		if action == PSRemote.ACT_OK:
+			stage.skip()
+			audio.play(&"pickup")
+			print("[ui] settlement rise skipped (OK)")
+			return
+		if action == PSRemote.ACT_BACK:
+			stage.skip()
+			_enter_select("settle_back_skip")
+			return
 	match action:
 		PSRemote.ACT_LEFT, PSRemote.ACT_UP:
 			settle_focus = 0
