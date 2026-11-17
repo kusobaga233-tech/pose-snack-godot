@@ -83,6 +83,19 @@ static func _run(pin, t: float, frames: int, f: Dictionary, count: int = 2) -> f
 	return t
 
 
+## Run `frames` identical pose frames (1/60 s apart) through the mapper so the
+## speed low-pass (0.09 s) and the 3/s slew limit settle, and return the
+## published multiplier. `left` may be null (one-arm call); the two visibilities
+## are passed straight through.
+static func _settle(pose, out, right: Vector2, left, ref: Vector2, torso: float,
+		t0: float, frames: int = 60, r_vis: float = 1.0, l_vis: float = 1.0) -> float:
+	var tt := t0
+	for k in frames:
+		tt += 1.0 / 60.0
+		pose.update_wrist(right, ref, torso, tt, out, left, ref, r_vis, l_vis)
+	return out.speed_scale
+
+
 static func run(t) -> void:
 	t.suite("input")
 	var cfg = PSConfig.new()
@@ -155,7 +168,13 @@ static func run(t) -> void:
 	t.ok("dead zone reported", not pose.last_deadzone_pass)
 	# ... and it does not corrupt the speed: the previous target is kept and the
 	# low-pass keeps chasing it.
-	t.gt("speed stays high inside the dead zone", out.speed_scale, 1.5)
+	# 2026-11-17 (speed symmetry): the steering holds no longer FREEZE the speed
+	# target - the dead zone / hang / motion gates are steering gates and the
+	# speed curve reads the wrist distance (max over the usable arms). One held
+	# frame therefore starts easing the speed down (smooth 0.09 s + 3/s slew),
+	# but cannot jump to the minimum in a single frame.
+	t.gt("speed starts easing inside the dead zone", out.speed_scale, 1.3)
+	t.lt("speed does not snap to the minimum in one held frame", out.speed_scale, 1.8)
 
 	# ---- distance -> speed mapping ----------------------------------------
 	# First frame snaps to the target (no previous sample => dt 0 => alpha 1).
@@ -174,6 +193,66 @@ static func run(t) -> void:
 	pose.reset()
 	pose.update_wrist(center + Vector2(3.0 * torso, 0.0), center, torso, 4.0, out)
 	t.eq_float("far reach clamps to max", out.speed_scale, 1.80, 1e-9)
+
+	# ---- speed distance = the MORE EXTENDED arm (2026-11-17) --------------
+	# Owner: 右手向右伸很快, 向左/向上伸就慢, 抬左臂完全没用. The curve now reads
+	#     speed_dist = max(|rwr - rsh|, |lwr - lsh|) / torso
+	# while steering stays right-wrist/right-shoulder only. The two wrists are
+	# passed relative to the same abstract centre here: the mapper only needs the
+	# two arm lengths, the reference for the left arm is its own shoulder.
+	var lhang := center + Vector2(0.0, 0.98 * torso)        # left arm hanging
+	var lreach := center + Vector2(-0.95 * torso, 0.0)      # left arm out to the left
+	var lup := center + Vector2(0.0, -0.95 * torso)         # left arm raised
+	var lbent := center + Vector2(-0.30, 0.10) * torso       # bent, near its shoulder
+	# The old chest direction from the right shoulder (|v| = 0.5845 torso), which
+	# is inside the 0.70 dead zone: it may HOLD the angle but must not hide the
+	# speed distance from the other arm.
+	var chest_v := Vector2(cos(2.509), sin(2.509)) * 0.5845
+	pose.reset()
+	pose.update_wrist(center + Vector2(0.80 * torso, 0.0), center, torso, 20.0, out,
+		lhang, center)
+	var s_low := _settle(pose, out, center + Vector2(0.80 * torso, 0.0), lhang,
+		center, torso, 20.0)
+	t.eq_float("low extension on both arms -> min speed", s_low, 0.65, 1e-3)
+	# Right arm HANGING (passive) + left arm reaching: the left arm alone must
+	# reach max speed. That is exactly the gesture the owner could not feel.
+	var s_left := _settle(pose, out, center + Vector2(0.0, 0.98 * torso), lreach,
+		center, torso, 20.6)
+	t.eq_float("left reach (right arm hanging) -> max speed", s_left, 1.80, 1e-3)
+	t.eq_int("...the left arm is the speed source", pose.last_speed_arm, 1)
+	var s_up := _settle(pose, out, center + Vector2(0.0, 0.98 * torso), lup,
+		center, torso, 21.2)
+	t.eq_float("raised left arm -> max speed", s_up, 1.80, 1e-3)
+	t.eq_int("...the left arm is the speed source (raised)", pose.last_speed_arm, 1)
+	# Side effect guard: with max(), a left arm that is BENT near its shoulder -
+	# or hanging - must NOT raise the speed while the right hand steers at the
+	# chest. Both are either below `near` or a passive arm.
+	pose.reset()
+	pose.update_wrist(center + chest_v * torso, center, torso, 22.0, out, lhang, center)
+	var s_bent := _settle(pose, out, center + chest_v * torso, lbent,
+		center, torso, 22.0)
+	t.eq_float("bent left arm near the shoulder -> min speed", s_bent, 0.65, 1e-3)
+	pose.reset()
+	pose.update_wrist(center + chest_v * torso, center, torso, 23.0, out, lhang, center)
+	var s_hang := _settle(pose, out, center + chest_v * torso, lhang,
+		center, torso, 23.0)
+	t.eq_float("hanging left arm -> min speed (passive arm ignored)", s_hang, 0.65, 1e-3)
+	# A wrist below `min_visibility` is ignored for speed: fall back to the other
+	# arm (here the right one is pulled in, so the result is the minimum).
+	pose.reset()
+	pose.update_wrist(center + Vector2(0.40 * torso, 0.0), center, torso, 24.0, out,
+		lreach, center, 1.0, 0.10)
+	var s_inv := _settle(pose, out, center + Vector2(0.40 * torso, 0.0), lreach,
+		center, torso, 24.0, 60, 1.0, 0.10)
+	t.eq_float("invisible left wrist is ignored for speed", s_inv, 0.65, 1e-3)
+	t.eq_int("...speed falls back to the right arm", pose.last_speed_arm, 0)
+	# BOTH arms invisible: the last target is kept (no curve evaluation at all).
+	pose.reset()
+	pose.update_wrist(center + Vector2(1.10 * torso, 0.0), center, torso, 25.0, out,
+		lreach, center)
+	pose.update_wrist(center + Vector2(0.04 * torso, 0.0), center, torso, 25.02, out,
+		lreach, center, 0.0, 0.0)
+	t.eq_float("both wrists invisible -> last speed kept", out.speed_scale, 1.80, 1e-9)
 
 	# ---- speed smoothing + slew limit -------------------------------------
 	pose.reset()

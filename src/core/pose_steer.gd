@@ -37,7 +37,10 @@ extends RefCounted
 ##      keeps working). Hysteresis on both the depth and the cone angle.
 ##   6. speed  = lerp(pose.speed.min .. max) over near..far of the *raw* normalised
 ##      distance, then a first-order low-pass (`smooth`, seconds) and a slew-rate
-##      limit (`slew` per second) so a reference jump cannot spike the speed
+##      limit (`slew` per second) so a reference jump cannot spike the speed.
+##      Since 2026-11-17 the distance is the MORE EXTENDED arm,
+##      `max(|rwr - rsh|, |lwr - lsh|) / torso` (see "Why both arms" below); the
+##      curve itself, the low-pass and the slew limit are unchanged.
 ##
 ## The turn-rate limit itself lives in `PSSnake.update()` (`turn.rate`), i.e. the
 ## mapper only produces *intent*; the snake is the one that cannot turn faster.
@@ -45,11 +48,27 @@ extends RefCounted
 ## `evidence/pose-trace-*.txt`.
 ##
 ##     var pose := PSPoseSteer.new(cfg)
-##     pose.update_wrist(wrist_px, ref_px, torso_px, now, steer)
+##     pose.update_wrist(wrist_px, ref_px, torso_px, now, steer,
+##         left_wrist_px, left_shoulder_px, rwr_visibility, lwr_visibility)
 ##     ...
 ##     pose.mark_lost(now, steer)     # tracker dropped the pose this frame
 ##
 ## Everything here is allocation-free; the caller reuses the `steer` struct.
+##
+## Why both arms (owner 2026-11-17: 右手向右伸很快, 向左/向上伸就慢)
+## -----------------------------------------------------------------
+## `dist_n = |right wrist - RIGHT shoulder| / torso` is inherently asymmetric:
+## reaching RIGHT moves the wrist away from the right shoulder (long), reaching
+## LEFT crosses the body towards it (short), and raising the LEFT arm does not
+## move the right wrist at all. The owner therefore felt a different maximum
+## speed for the same gesture on different sides. The speed now reads the more
+## extended of the two arms, while **steering stays right-wrist/right-shoulder
+## only** (`last_angle`, the dead zone and the published heading are untouched).
+## A PASSIVE hanging arm (the same posture test as the `pose.hang_*` steering
+## gate, applied to each arm's own shoulder) is not a reach and is left out of
+## the max, so dropping an arm can neither raise nor hold the speed by accident.
+## `configuration.pose.speed.both_arms = false` restores the pre-fix law for the
+## A/B trace (`--pose-arms=before`).
 ##
 ## Why the distance stays raw
 ## --------------------------
@@ -95,6 +114,15 @@ var smooth_speed: float = 1.0
 
 ## Diagnostics for the HUD / tests (JS `signal.debug`).
 var last_dist_n: float = 0.0
+## The distance the SPEED curve actually consumed last frame: the more extended
+## usable arm (`max` of the two per-arm distances), the right-arm distance under
+## `speed.both_arms=false`, or -1 when no arm was usable (the target was kept).
+var last_speed_dist_n: float = -1.0
+## Which arm supplied `last_speed_dist_n`: 0 = right, 1 = left, -1 = none.
+var last_speed_arm: int = -1
+## Left arm distance (|lwr - lsh| / torso) of the newest frame, 0 when the left
+## arm was not supplied. Diagnostics only (`--capture-pose-trace`).
+var last_left_dist_n: float = 0.0
 ## Raw wrist-minus-reference vector in torso units. `last_dy_n > 0` = wrist BELOW
 ## the reference (canvas y points down); `last_dx_n` is mirrored-game x, so a
 ## positive value is the player's own right. Read by the hang gate below and by
@@ -148,6 +176,9 @@ var _speed_ref := Vector2.ZERO
 var _speed_filt: float = 0.0
 var _fast_frames: int = 0
 var _motion_free: bool = false
+## Left-arm "passive hanging" latch, the speed-side twin of `last_hang` (which
+## belongs to the RIGHT arm and to the steering gate). Same enter/exit thresholds.
+var _left_hang: bool = false
 
 
 func _init(p_cfg: PSConfig = null) -> void:
@@ -163,6 +194,9 @@ func reset() -> void:
 	speed_target = 1.0
 	smooth_speed = 1.0
 	last_dist_n = 0.0
+	last_speed_dist_n = -1.0
+	last_speed_arm = -1
+	last_left_dist_n = 0.0
 	last_dx_n = 0.0
 	last_dy_n = 0.0
 	last_deadzone_pass = false
@@ -187,6 +221,7 @@ func reset() -> void:
 	_speed_filt = 0.0
 	_fast_frames = 0
 	_motion_free = false
+	_left_hang = false
 	reacquire_count = 0
 
 
@@ -194,8 +229,17 @@ func reset() -> void:
 ## `torso_px` is the normalising torso length in pixels (>= 40 in the JS code).
 ## `ref_px` is the steering reference joint: the RIGHT SHOULDER since 2026-11-14
 ## (`pose.ref_joint`), the chest before.
+##
+## `left_wrist` / `left_ref` (optional, 2026-11-17): the LEFT wrist and the LEFT
+## shoulder, same mirrored pixel space, used ONLY by the speed distance (see
+## "Why both arms" at the top). Steering never reads them. Callers that do not
+## pass them (tests, the older one-arm path) keep the right-arm-only speed.
+## `right_vis` / `left_vis` are the tracker visibilities of those wrists; an arm
+## below `pose.min_visibility` is ignored for speed (falling back to the other
+## arm; when both are invisible the last speed target is kept, as before).
 func update_wrist(wrist: Vector2, ref_px: Vector2, torso_px: float,
-		now_sec: float, out: SteerInput) -> void:
+		now_sec: float, out: SteerInput, left_wrist = null, left_ref = null,
+		right_vis: float = 1.0, left_vis: float = 1.0) -> void:
 	var P = cfg.pose
 	var scale := torso_px
 	if not is_finite(scale) or scale < 1e-3:
@@ -207,6 +251,30 @@ func update_wrist(wrist: Vector2, ref_px: Vector2, torso_px: float,
 	last_dist_n = dist_n
 	last_dx_n = dx / scale
 	last_dy_n = dy / scale
+	# ---- left arm (speed only): distance from the LEFT shoulder, plus its own
+	# passive-hanging latch. Everything below is diagnostics or the speed max. --
+	var have_left: bool = (left_wrist is Vector2) and (left_ref is Vector2)
+	var ldx := 0.0
+	var ldy := 0.0
+	var ldist_n := 0.0
+	var lalign := 1.0
+	if have_left:
+		ldx = float(left_wrist.x) - float(left_ref.x)
+		ldy = float(left_wrist.y) - float(left_ref.y)
+		ldist_n = sqrt(ldx * ldx + ldy * ldy) / scale
+		lalign = absf(ldx) / maxf(1e-6, ldist_n * scale)
+	last_left_dist_n = ldist_n if have_left else 0.0
+	# The speed-side passivity test is the STEERING hang gate's posture rule
+	# applied to the left arm's own shoulder (the gate itself is untouched and
+	# stays right-arm/steering only). Same hysteresis thresholds, own latch.
+	if have_left:
+		if _left_hang:
+			if ldy / scale < P.hang_exit or lalign > P.hang_align + HANG_ALIGN_EXIT_MARGIN:
+				_left_hang = false
+		elif ldy / scale >= P.hang_enter and lalign <= P.hang_align:
+			_left_hang = true
+	else:
+		_left_hang = false
 
 	# ---- frame clock (shared by every low-pass below) ----------------------
 	var dt_sec := 0.0
@@ -331,13 +399,53 @@ func update_wrist(wrist: Vector2, ref_px: Vector2, torso_px: float,
 			has_angle = true
 	var angle := last_angle
 
-	# ---- distance -> speed multiplier (only trustworthy while moving) ------
-	# A hanging arm is not a reach: it holds the previous speed target exactly like
-	# the dead zone does, so lowering an arm cannot speed the snake up either.
+	# ---- distance -> speed multiplier --------------------------------------
+	# 2026-11-17 (owner: 向右伸很快, 向左/向上伸就慢): the SPEED reads the more
+	# extended arm, `max(|rwr-rsh|, |lwr-lsh|) / torso`, while the steering above
+	# stays right-wrist/right-shoulder only. The dead zone / hang / motion holds
+	# are STEERING gates: they must not freeze this target any more, or a left
+	# reach with the right arm hanging could never speed the snake up. A passive
+	# (hanging) arm is not a reach and is excluded per arm; when no arm is usable
+	# the previous target is kept exactly like the pre-fix law did while held.
 	var SP = P.speed
-	if not holding:
+	var speed_dn := -1.0
+	var speed_arm := -1
+	if not SP.both_arms:
+		# Pre-fix law (measurement only, `--pose-arms=before`): right arm only and
+		# the steering holds still freeze the target. The diagnostic distance is
+		# always the right-arm one (that is what the old curve would have read).
+		speed_dn = dist_n
+		speed_arm = 0
+		if not holding:
+			var span0 := maxf(0.05, SP.far - SP.near)
+			var t0 := clampf((speed_dn - SP.near) / span0, 0.0, 1.0)
+			speed_target = SP.min + (SP.max - SP.min) * t0
+	else:
+		var min_vis: float = P.min_visibility
+		var r_ok: bool = right_vis >= min_vis and not last_hang
+		var l_ok: bool = have_left and left_vis >= min_vis and not _left_hang
+		var r_dn: float = dist_n if r_ok else -1.0
+		var l_dn: float = ldist_n if l_ok else -1.0
+		if r_dn >= 0.0 and l_dn >= 0.0:
+			if l_dn > r_dn:
+				speed_dn = l_dn
+				speed_arm = 1
+			else:
+				speed_dn = r_dn
+				speed_arm = 0
+		elif r_dn >= 0.0:
+			speed_dn = r_dn
+			speed_arm = 0
+		elif l_dn >= 0.0:
+			speed_dn = l_dn
+			speed_arm = 1
+	last_speed_dist_n = speed_dn
+	last_speed_arm = speed_arm
+	# The two-arm law always evaluates the curve when a usable arm exists; the
+	# before law already did its (hold-gated) update in its own branch above.
+	if SP.both_arms and speed_dn >= 0.0:
 		var span := maxf(0.05, SP.far - SP.near)
-		var t_speed := clampf((dist_n - SP.near) / span, 0.0, 1.0)
+		var t_speed := clampf((speed_dn - SP.near) / span, 0.0, 1.0)
 		speed_target = SP.min + (SP.max - SP.min) * t_speed
 
 	# Debounce 1: frame-rate independent low-pass (smooth is a time constant).
@@ -420,6 +528,11 @@ func set_angle_direct(angle: float, p_speed_scale: float, now_sec: float,
 	last_wrist_speed = 0.0
 	last_speed_filt = 0.0
 	last_motion_free = false
+	# A bridge angle is not an arm distance either: drop the speed diagnostics so
+	# the next wrist frame reports its own.
+	last_speed_dist_n = -1.0
+	last_speed_arm = -1
+	_left_hang = false
 	# Restart the angle filter from the new truth, and make the next wrist frame
 	# snap the position filter instead of easing away from the old hand.
 	_filt_angle = angle

@@ -714,6 +714,11 @@ const CAM_BOOST_SHOT2 := 3.62
 const CAM_BOOST_START := Vector2(1000.0, 1100.0)
 var _capture_cam_boost := false
 var _cam_boost_tag := "run"
+## `--capture-respawn`: scripted death + real respawn, camera sampled until it
+## settles (see the block below the perf tick).
+var _capture_respawn := false
+## `--capture-sfx`: one scripted 20 s round, per-name `audio.play()` counts.
+var _capture_sfx := false
 ## `--capture-pose-trace`: scripted hand path through the real mapper, one line per
 ## frame into `evidence/pose-trace-<law>.txt` (see the block below).
 var _capture_pose_trace := false
@@ -772,6 +777,8 @@ func _ready() -> void:
 	_capture_perf = args.has("--capture-perf")
 	_capture_cam = args.has("--capture-cam")
 	_capture_cam_boost = args.has("--capture-cam-boost")
+	_capture_respawn = args.has("--capture-respawn")
+	_capture_sfx = args.has("--capture-sfx")
 	_capture_pose_trace = args.has("--capture-pose-trace")
 	_capture_skeleton = args.has("--capture-skeleton")
 	_capture_stress = args.has("--capture-stress")
@@ -782,6 +789,17 @@ func _ready() -> void:
 	_ptrace_tag = _str_from_args(args, "--pose-law=", "after")
 	_cam_boost_tag = _str_from_args(args, "--cam-boost-tag=", "run")
 	_overlap_tag = _str_from_args(args, "--overlap-tag=", "shot")
+	_respawn_tag = _str_from_args(args, "--respawn=", "after")
+	_sfx_tag = _str_from_args(args, "--sfx=", "after")
+	# Shipped routing: the in-game blips of FOOD / POWERUP / DEATH are SELF cues,
+	# so only a human snake's event asks for one (2P: both humans). `--sfx=before`
+	# restores the old every-snake routing for the density measurement only.
+	_sfx_human_only = _sfx_tag != "before"
+	# `--respawn=before` (measurement only): the pre-fix camera response to the
+	# SAME respawn point - no snap, the follow law has to ease there. Everything
+	# else (the respawn POINT rule) is identical, so the two probe runs differ in
+	# the camera law alone.
+	_cam_respawn_snap_on = _respawn_tag != "before"
 	_remote_probe = args.has("--remote-probe") and not _capture_remote
 	_probe_nav = args.has("--remote-nav") and not _capture_remote and not _remote_probe
 	_capture = args.has("--capture") or args.has("--capture2p") or _capture_flow \
@@ -789,8 +807,8 @@ func _ready() -> void:
 	_capture_2p = args.has("--capture2p")
 	_tool_synth = _capture or _capture_remote or _remote_probe or _capture_overlap \
 		or _capture_tuning or _capture_shake or _capture_perf or _capture_cam \
-		or _capture_cam_boost or _capture_pose_trace or _capture_skeleton or _probe_nav \
-		or _capture_stress or _capture_cam2p
+		or _capture_cam_boost or _capture_respawn or _capture_sfx or _capture_pose_trace \
+		or _capture_skeleton or _probe_nav or _capture_stress or _capture_cam2p
 	# ---- desktop dev pose (owner: the editor is stuck on 准备开始) -------------
 	# On the PC there is no SDK camera, so `pose.tracking` is permanently false and
 	# the READY gate can never open - the game sits on 准备开始 forever. On desktop
@@ -951,6 +969,15 @@ func _ready() -> void:
 	var tag_arg := _str_from_args(args, "--pose-tag=", "")
 	if tag_arg != "":
 		_ptrace_file_tag = tag_arg
+	# `--pose-arms=before` (measurement only, 2026-11-17): the PRE-FIX speed law -
+	# `dist_n` from the RIGHT arm only, and the steering holds still freeze the
+	# target - on the SAME scripted gestures. The shipped default reads the more
+	# extended of the two arms (`pose.speed.both_arms`). That is the A/B pair
+	# `evidence/pose-trace-speed-arms-{before,after}.txt`.
+	if _str_from_args(args, "--pose-arms=", "max") == "before":
+		cfg.pose.speed.both_arms = false
+		print("[pose-trace] speed arms=before: right-arm distance only, " +
+			"steering holds freeze the speed target")
 	# `--pose-tau=W,A` (measurement only): override the two time constants so the
 	# shipped values can be chosen from a sweep instead of a guess.
 	var tau_arg := _str_from_args(args, "--pose-tau=", "")
@@ -1196,6 +1223,7 @@ func _process(delta: float) -> void:
 
 	if mode == MODE_PLAY or mode == MODE_SELECT or mode == MODE_READY:
 		fx.update(real_dt)
+	_respawn_note_log()
 	if go_flash > 0.0:
 		go_flash = maxf(0.0, go_flash - real_dt * 1.2)
 	_update_cameras(real_dt, dt)
@@ -1235,6 +1263,10 @@ func _process(delta: float) -> void:
 		_capture_cam_tick(real_dt)
 	elif _capture_cam_boost:
 		_capture_cam_boost_tick(real_dt)
+	elif _capture_respawn:
+		_capture_respawn_tick(real_dt)
+	elif _capture_sfx:
+		_capture_sfx_tick(real_dt)
 	elif _capture_pose_trace:
 		_capture_pose_trace_tick()
 	elif _capture_skeleton:
@@ -2341,6 +2373,20 @@ var _cam_head_prev: Array = [Vector2.ZERO, Vector2.ZERO]
 var _cam_speed_max: Array = [0.0, 0.0]
 ## True while the catch-up term owns the follow for a view (see CAM_SAFE_FRAC).
 var _cam_catch: Array = [false, false]
+## Alive flag of each view's human on the PREVIOUS frame: a false -> true edge is
+## a respawn (`PSGame.respawn_player`), i.e. the one teleport the camera must not
+## ease across. `_snap_cameras()` re-seeds it on every deliberate re-frame
+## (boot / countdown / 2P change), so only a real in-play respawn fires.
+var _cam_alive_prev: Array = [false, false]
+## How many respawn snaps have fired (the probe quotes it: 1 after, 0 before).
+var _cam_respawn_snaps := 0
+## Shipped: true. `--capture-respawn --respawn=before` clears it so the SAME
+## respawn point is measured under the pre-fix camera law.
+var _cam_respawn_snap_on := true
+## --capture-respawn measurement tag ("after" | "before").
+var _respawn_tag := "after"
+## Last `game.respawn_note_count` already printed (one line per fallback respawn).
+var _respawn_note_seen := -1
 ## Presentation-only diagnostics for the camera probes (view 0). The follow law
 ## writes them every frame; nothing in the rules reads them.
 var _cam_dbg_speed := 0.0
@@ -2370,11 +2416,14 @@ func _cam_caps(speed: float, peak: float) -> Vector2:
 ## Re-anchor both views: jump the follow centre onto its target and re-seed the
 ## smoothed lookahead + the velocity from the snake's current state, so the caps
 ## never turn a deliberate re-frame (boot, countdown, 2P change) into a slow drift.
+## Also syncs the respawn edge detector: a round start is not a respawn.
 func _snap_cameras() -> void:
 	for i in 2:
 		var t: Vector2 = game.cam_targets[i] if i < game.cam_targets.size() else game.cam_target
 		cams[i] = t
-		_cam_seed(i, game.players[i] if i < game.players.size() else null)
+		var p = game.players[i] if i < game.players.size() else null
+		_cam_alive_prev[i] = p != null and p.alive
+		_cam_seed(i, p)
 
 
 ## Seed the smoothed lookahead vector and the follow velocity from a snake's
@@ -2402,6 +2451,76 @@ func _cam_lookahead(p) -> float:
 	return minf(CAM_LA_MAX, p.speed * 0.45)
 
 
+## Keep a follow centre inside the arena and kill the velocity component the
+## clamp blocks (otherwise the camera banks speed into a wall it can never spend
+## and has to reverse it when the head comes back). Shared by the normal follow
+## and the respawn snap, so the snap obeys the same arena invariant.
+func _cam_clamp(i: int, c: Vector2) -> Vector2:
+	var world_w: float = cfg.world.w
+	var world_h: float = cfg.world.h
+	var span2: Vector2 = spans[i]
+	var half2: Vector2 = span2 * 0.5
+	var free := c
+	if span2.x >= world_w:
+		c.x = world_w * 0.5
+	else:
+		c.x = clampf(c.x, half2.x, world_w - half2.x)
+	if span2.y >= world_h:
+		c.y = world_h * 0.5
+	else:
+		c.y = clampf(c.y, half2.y, world_h - half2.y)
+	var v_now: Vector2 = _cam_vel[i]
+	if c.x != free.x:
+		v_now.x = 0.0
+	if c.y != free.y:
+		v_now.y = 0.0
+	_cam_vel[i] = v_now
+	return c
+
+
+## One `[respawn]` line per respawn that had to leave the inset, so a device log
+## explains WHY a snake appeared outside the requested inset. The common
+## in-inset fallback (closest safe point to the view centre) is by design and is
+## not logged; only the "whole inset blocked" case is.
+func _respawn_note_log() -> void:
+	if game == null or game.respawn_note != "world-fallback":
+		return
+	if game.respawn_note_count <= _respawn_note_seen:
+		return
+	_respawn_note_seen = game.respawn_note_count
+	var pt: Vector2 = game.respawn_note_point
+	print(("[respawn] WHOLE inset blocked (every candidate is inside the " +
+		"clearance of a living snake) -> closest safe point OUTSIDE the inset " +
+		"(%.0f,%.0f)") % [pt.x, pt.y])
+
+
+## RESPAWN SNAP (owner 2026-11-17: 复活后镜头长距离平移).
+##
+## A respawn teleports the snake across the arena (up to a full screen away). The
+## follow law is a low-pass with adaptive caps, so easing across that teleport
+## looked like a multi-frame pan. This is the one-frame law for the respawn frame
+## itself:
+##   (a) the follow centre is placed DIRECTLY on the new target (arena-clamped),
+##   (b) the follow velocity is zeroed, and
+##   (c) the lookahead low-pass and the adaptive caps are NOT run this frame.
+## The next frame resumes the normal follow from a standstill (`_cam_seed`-style
+## re-seed of the head/peak so the caps never see the teleport as speed).
+## Logs exactly one `[cam] snap to respawn (x,y)` per respawn.
+func _cam_respawn_snap(i: int, p, t: Vector2) -> void:
+	_cam_la[i] = Vector2.ZERO
+	cams[i] = _cam_clamp(i, t)
+	_cam_vel[i] = Vector2.ZERO
+	_cam_catch[i] = false
+	_cam_speed_max[i] = 0.0
+	_cam_head_prev[i] = t
+	if p != null and p.alive and p.body.size() > 0:
+		_cam_head_prev[i] = p.body[0]
+		_cam_speed_max[i] = maxf(0.0, p.speed)
+	_cam_respawn_snaps += 1
+	var view := "" if player_count <= 1 else " view=%d" % i
+	print("[cam] snap to respawn (%.0f,%.0f)%s" % [t.x, t.y, view])
+
+
 func _update_cameras(dt: float, sim_dt: float = -1.0) -> void:
 	if sim_dt <= 0.0:
 		sim_dt = dt
@@ -2413,6 +2532,31 @@ func _update_cameras(dt: float, sim_dt: float = -1.0) -> void:
 	for i in n:
 		var p = game.players[i] if i < game.players.size() else null
 		var t: Vector2 = game.cam_targets[i] if i < game.cam_targets.size() else game.cam_target
+		# ---- RESPAWN EDGE (false -> true): the one teleport that must snap -----
+		# `PSGame.update()` runs the respawn inside the frame, so this detector
+		# sees the new alive flag together with the new `cam_targets` entry and
+		# snaps on the very same frame the snake appears there.
+		var respawned: bool = p != null and p.alive and not _cam_alive_prev[i]
+		_cam_alive_prev[i] = p != null and p.alive
+		if respawned and _cam_respawn_snap_on:
+			_cam_respawn_snap(i, p, t)
+			var zr: float = zooms[i]
+			var vr = worlds[i]
+			vr.zoom = zr
+			vr.cam = cams[i] + shake / maxf(0.2, zr)
+			if i == 0:
+				# The head is exactly on the follow centre this frame; the caps
+				# were not evaluated (they restart next frame).
+				_cam_dbg_speed = 0.0
+				_cam_dbg_vmax = 0.0
+				_cam_dbg_amax = 0.0
+				_cam_dbg_vmax_base = 0.0
+				_cam_dbg_amax_base = 0.0
+				_cam_dbg_off = Vector2.ZERO
+				_cam_dbg_safe = spans[i] * 0.5 * CAM_SAFE_FRAC * zr
+				_cam_dbg_catch = false
+				_cam_dbg_clamp = false
+			continue
 		var head: Vector2 = t
 		# ---- 0. measure the head: actual velocity and the round's max speed ----
 		var head_vel := Vector2.ZERO
@@ -2528,26 +2672,7 @@ func _update_cameras(dt: float, sim_dt: float = -1.0) -> void:
 			_cam_vel[i] = v
 			c += v * dt
 		# ---- 4. arena clamp (after the follow, as before) ----
-		var span2: Vector2 = spans[i]
-		var half2 := span2 * 0.5
-		var free := c
-		if span2.x >= world_w:
-			c.x = world_w * 0.5
-		else:
-			c.x = clampf(c.x, half2.x, world_w - half2.x)
-		if span2.y >= world_h:
-			c.y = world_h * 0.5
-		else:
-			c.y = clampf(c.y, half2.y, world_h - half2.y)
-		# The clamp blocks the motion, so the blocked velocity component must die
-		# with it; otherwise the camera "banks" speed into a wall it can never
-		# spend and has to reverse it when the head comes back.
-		var v_now: Vector2 = _cam_vel[i]
-		if c.x != free.x:
-			v_now.x = 0.0
-		if c.y != free.y:
-			v_now.y = 0.0
-		_cam_vel[i] = v_now
+		c = _cam_clamp(i, c)
 		cams[i] = c
 		if i == 0:
 			_cam_dbg_speed = speed
@@ -2556,7 +2681,7 @@ func _update_cameras(dt: float, sim_dt: float = -1.0) -> void:
 			_cam_dbg_vmax_base = fmax_base
 			_cam_dbg_amax_base = amax_base
 			_cam_dbg_off = (head - c) * zooms[i]
-			_cam_dbg_safe = span2 * 0.5 * CAM_SAFE_FRAC * zooms[i]
+			_cam_dbg_safe = spans[i] * 0.5 * CAM_SAFE_FRAC * zooms[i]
 			_cam_dbg_catch = catching
 			_cam_dbg_clamp = clamp_x or clamp_y
 		var v2 = worlds[i]
@@ -2639,7 +2764,10 @@ func _resolve_input(real_dt: float) -> void:
 				continue
 		# 2. capture tooling only (`--capture*` / `--remote-probe`)
 		if _tool_synth:
-			_synth_steer(i, st)
+			# The respawn probe needs a STILL player: no synth script, so the
+			# camera measurement is not contaminated by scripted movement.
+			if not _capture_respawn:
+				_synth_steer(i, st)
 			continue
 		# 3. pose (the only gameplay input in the shipped build)
 		if input_source == SRC_POSE and pose != null:
@@ -2756,7 +2884,12 @@ func _drain_events() -> void:
 		match ev.type:
 			PSEvents.EV_FOOD:
 				fx.eat(ev.x, ev.y, ev.color, ev.big)
-				audio.play(&"big" if ev.big else &"eat", 0.9 + fx.rnd() * 0.25)
+				# 2026-11-17 (owner: 局内音效太密集): the eat blip is a SELF cue.
+				# Seven AI chasing 195 pellets fired it dozens of times a second;
+				# `--sfx=before` restores the old every-snake routing for the
+				# density measurement, the shipped build only plays the player's.
+				if not _sfx_human_only or ev.own:
+					audio.play(&"big" if ev.big else &"eat", 0.9 + fx.rnd() * 0.25)
 				# The eat shake stays (owner: 吃东西抖动可留). It is the smallest
 				# request in the system - 1.0 px on a pellet, 2.5 px on big food -
 				# and `SHAKE_SCALE` trims it like everything else.
@@ -2767,10 +2900,23 @@ func _drain_events() -> void:
 			PSEvents.EV_POWERUP:
 				fx.pickup(ev.x, ev.y, ev.color)
 				fx.text(ev.x, ev.y - 60.0, ev.label, ev.color, 30.0)
-				audio.play(&"pickup")
+				# Owner 2026-11-17: 吃道具音频太密集，只播放自己的吃道具音效.
+				# `own` is set by the rules for every HUMAN snake, so 2P still
+				# plays both players' pickups (one blip per pickup).
+				if ev.own:
+					_sfx_pick_own += 1
+				else:
+					_sfx_pick_ai += 1
+				if not _sfx_human_only or ev.own:
+					audio.play(&"pickup")
 			PSEvents.EV_DEATH:
 				fx.death(ev.points, ev.color, Vector2(ev.x, ev.y))
-				audio.play(&"kill" if ev.killer_is_player else &"death", 0.9 + fx.rnd() * 0.2)
+				# Keep the two cues that are about the player: the player's own
+				# death and a kill scored by a human. An AI-vs-AI death is silent
+				# under the shipped rule (it is the other frequent AI sound).
+				if not _sfx_human_only or ev.own or ev.killer_is_player:
+					audio.play(&"kill" if ev.killer_is_player else &"death",
+						0.9 + fx.rnd() * 0.2)
 				if ev.own:
 					fx.add_shake(16.0)
 					fx.add_flash(0.24, Color(1.0, 0.3, 0.4))
@@ -3780,6 +3926,352 @@ func _cam_boost_place() -> void:
 ## primitives with the panel ON and OFF - the only difference between the two
 ## passes is `hud.perf_on` - then saves `evidence/perf-overlay-1920.png` with the
 ## panel up and prints the delta.
+# --------------------------------------------------------- respawn probe
+#
+# `--capture-respawn` (2026-11-17, owner: 复活后镜头长距离平移): the camera
+# evidence for fix 1 + 2. A scripted death with ONE living snake parked on the
+# death spot forces `respawn_player()` to clear it by the 1100 px human
+# clearance, i.e. the respawn is a real teleport of >1000 px (the exact case the
+# snap exists for). The probe then measures the camera frame by frame until the
+# follow centre is back on the target:
+#
+#   travel   = |new target - camera on the frame before the respawn|
+#   step     = |camera on the respawn frame - camera before it|
+#   frames   = frames from the respawn frame until |camera - target| <= 2 px
+#   path     = summed per-frame camera motion over that window
+#
+# `--respawn=before` disables ONLY the snap (`_cam_respawn_snap_on = false`), so
+# both runs use the SAME respawn point and differ in the camera law alone:
+# before = the follow law has to ease the whole travel, after = one frame.
+# The same run also prints the respawn-inset proof (`[respawn-proof]`): 50 real
+# respawn_player calls on a scratch game, with the border distances and the
+# clearance to every living snake head.
+const RESPAWN_PROBE_DEATH := Vector2(1500.0, 1350.0)
+const RESPAWN_PROBE_KILL_DELAY := 0.40
+const RESPAWN_PROBE_RESPAWN_IN := 0.20
+const RESPAWN_PROBE_MAX_FRAMES := 180
+const RESPAWN_PROOF_N := 50
+var _respawn_step := 0
+var _respawn_t := 0.0
+var _respawn_frames := 0
+var _respawn_settle := -1
+var _respawn_path := 0.0
+var _respawn_max_step := 0.0
+var _respawn_cam_prev := Vector2.ZERO
+var _respawn_target := Vector2.ZERO
+var _respawn_travel := 0.0
+var _respawn_spawn := Vector2.ZERO
+var _respawn_kill_at := -1.0
+var _respawn_killed := false
+
+
+func _capture_respawn_tick(dt: float) -> void:
+	_respawn_t += dt
+	if _respawn_step == 0 and _respawn_t > 0.5:
+		_respawn_step = 1
+		print("[respawn] begin mode=%s snap=%s inset=(%.0f,%.0f) death=(%.0f,%.0f)" % [
+			_respawn_tag, "on" if _cam_respawn_snap_on else "off",
+			cfg.player.respawn_inset.x, cfg.player.respawn_inset.y,
+			RESPAWN_PROBE_DEATH.x, RESPAWN_PROBE_DEATH.y])
+		_respawn_proof()
+		_begin_countdown("respawn-probe")
+	if _respawn_step == 1 and mode == MODE_PLAY:
+		_respawn_step = 2
+		_respawn_t = 0.0
+		_respawn_place()
+		return
+	if _respawn_step < 2:
+		return
+	var p = game.player
+	if p == null:
+		return
+	if _respawn_step == 2:
+		if not _respawn_killed:
+			# Let the camera settle on the death spot first, then kill.
+			if _respawn_kill_at < 0.0:
+				_respawn_kill_at = _respawn_t + RESPAWN_PROBE_KILL_DELAY
+			elif _respawn_t >= _respawn_kill_at:
+				game.kill_snake(p, null)
+				p.respawn_timer = RESPAWN_PROBE_RESPAWN_IN
+				_respawn_killed = true
+				print("[respawn] killed death=(%.0f,%.0f) cam=(%.0f,%.0f) respawn_in=%.2fs" % [
+					RESPAWN_PROBE_DEATH.x, RESPAWN_PROBE_DEATH.y, cams[0].x, cams[0].y,
+					RESPAWN_PROBE_RESPAWN_IN])
+		elif p.alive and p.body.size() > 0:
+			# ---- RESPAWN FRAME: `_update_cameras` has already run for it ----
+			_respawn_step = 3
+			_respawn_spawn = p.body[0]
+			# Park the snake on the spawn for the whole measurement window: the
+			# probe measures the CAMERA law, not the snake's own motion.
+			p.freeze_until = game.time + 9999.0
+			p.immune_until = game.time + 9999.0
+			_respawn_target = game.cam_targets[0] \
+				if game.cam_targets.size() > 0 else game.cam_target
+			_respawn_travel = _respawn_cam_prev.distance_to(_respawn_target)
+			var step0: float = cams[0].distance_to(_respawn_cam_prev)
+			_respawn_frames = 1
+			_respawn_path = step0
+			_respawn_max_step = step0
+			if cams[0].distance_to(_respawn_goal()) <= 2.0:
+				_respawn_settle = 1
+			print(("[respawn] respawn frame=1 spawn=(%.1f,%.1f) target=(%.1f,%.1f) " +
+				"cam_before=(%.1f,%.1f) cam=(%.1f,%.1f) step=%.2fpx remaining=%.2fpx") % [
+				_respawn_spawn.x, _respawn_spawn.y, _respawn_target.x,
+				_respawn_target.y, _respawn_cam_prev.x, _respawn_cam_prev.y,
+				cams[0].x, cams[0].y, step0,
+				cams[0].distance_to(_respawn_goal())])
+			_respawn_cam_prev = cams[0]
+			return
+		_respawn_cam_prev = cams[0]
+		return
+	# ---- step 3: sample the follow until it settles on the new target ---------
+	_respawn_frames += 1
+	var step: float = cams[0].distance_to(_respawn_cam_prev)
+	_respawn_cam_prev = cams[0]
+	_respawn_path += step
+	_respawn_max_step = maxf(_respawn_max_step, step)
+	var rem: float = cams[0].distance_to(_respawn_goal())
+	if _respawn_settle < 0 and rem <= 2.0:
+		_respawn_settle = _respawn_frames
+	if _respawn_frames >= RESPAWN_PROBE_MAX_FRAMES \
+			or (_respawn_settle >= 0 and _respawn_frames >= _respawn_settle + 8):
+		_respawn_report()
+
+
+## The camera's actual goal this frame: the follow target plus the smoothed
+## lookahead. The probe measures the settle against it, because the lookahead is
+## the normal follow's own offset and not part of the respawn teleport.
+func _respawn_goal() -> Vector2:
+	return _respawn_target + _cam_la[0]
+
+
+## Stage the probe: one human frozen on the death spot, ONE live blocker parked
+## on the same spot (so the respawn must clear it by the 1100 px human clearance,
+## i.e. it has to teleport - the case the snap exists for), no other AI, no
+## food/powerups, camera snapped. The measurement therefore starts from a known
+## camera and the respawn travel cannot be zero.
+func _respawn_place() -> void:
+	var p = game.player
+	if p == null:
+		return
+	p.reset(RESPAWN_PROBE_DEATH.x, RESPAWN_PROBE_DEATH.y, 0.0, 40)
+	p.immune_until = game.time + 9999.0
+	p.freeze_until = game.time + 9999.0
+	var i := 0
+	while i < game.snakes.size():
+		var s = game.snakes[i]
+		i += 1
+		if s == p:
+			continue
+		s.alive = false
+		s.body.resize(0)
+		s.pulse.resize(0)
+		s.respawn_timer = 9999.0
+	# The blocker is a real living snake head exactly on the death spot.
+	var blocker = game.snakes[1]
+	blocker.reset(RESPAWN_PROBE_DEATH.x, RESPAWN_PROBE_DEATH.y, PI * 0.5, 16)
+	blocker.freeze_until = game.time + 9999.0
+	blocker.immune_until = game.time + 9999.0
+	game.foods.resize(0)
+	game.powerups.resize(0)
+	# Point the follow at the death spot BEFORE snapping: `game.reset()` still
+	# holds the round's spawn point in `cam_targets`, and letting the camera ease
+	# from there would contaminate the measurement.
+	if game.cam_targets.size() > 0:
+		game.cam_targets[0] = p.body[0]
+	game.cam_target = p.body[0]
+	_snap_cameras()
+	_respawn_cam_prev = cams[0]
+	_respawn_killed = false
+	_respawn_kill_at = -1.0
+	_respawn_settle = -1
+	_respawn_frames = 0
+	_respawn_path = 0.0
+	_respawn_max_step = 0.0
+	_respawn_spawn = RESPAWN_PROBE_DEATH
+	_respawn_target = game.cam_targets[0] if game.cam_targets.size() > 0 else game.cam_target
+
+
+func _respawn_report() -> void:
+	var w: float = cfg.world.w
+	var h: float = cfg.world.h
+	var border := Vector2(minf(_respawn_spawn.x, w - _respawn_spawn.x),
+		minf(_respawn_spawn.y, h - _respawn_spawn.y))
+	var frames := _respawn_settle if _respawn_settle >= 0 else _respawn_frames
+	var travel := _respawn_travel
+	print(("[respawn] result mode=%s snap=%s death=(%.0f,%.0f) spawn=(%.0f,%.0f) " +
+		"border=(%.0f,%.0f) travel=%.1fpx frames_to_settle=%d path=%.1fpx " +
+		"max_step=%.1fpx snaps=%d") % [
+		_respawn_tag, "on" if _cam_respawn_snap_on else "off",
+		RESPAWN_PROBE_DEATH.x, RESPAWN_PROBE_DEATH.y, _respawn_spawn.x,
+		_respawn_spawn.y, border.x, border.y, travel, frames, _respawn_path,
+		_respawn_max_step, _cam_respawn_snaps])
+	print("[capture] done")
+	get_tree().quit(0)
+
+
+## Respawn-inset proof: N real `respawn_player()` calls on a scratch game, twice,
+## to show (a) every point is inside the half-screen inset, (b) the clearance to
+## every living snake head is kept, and (c) the sequence is deterministic.
+func _respawn_proof() -> void:
+	var pts_a := _respawn_proof_run(20261117)
+	var pts_b := _respawn_proof_run(20261117)
+	var inset: Vector2 = cfg.player.respawn_inset
+	var w: float = cfg.world.w
+	var h: float = cfg.world.h
+	var inside := 0
+	var min_border := Vector2(1.0e18, 1.0e18)
+	var min_clear := 1.0e18
+	var fallbacks := 0
+	var world_fallbacks := 0
+	for row in pts_a:
+		var hd: Vector2 = row["p"]
+		if hd.x >= inset.x and hd.x <= w - inset.x \
+				and hd.y >= inset.y and hd.y <= h - inset.y:
+			inside += 1
+		min_border.x = minf(min_border.x, minf(hd.x, w - hd.x))
+		min_border.y = minf(min_border.y, minf(hd.y, h - hd.y))
+		min_clear = minf(min_clear, float(row["clear"]))
+		if String(row["note"]) == "inset-fallback":
+			fallbacks += 1
+		elif String(row["note"]) == "world-fallback":
+			world_fallbacks += 1
+	var same := pts_a.size() == pts_b.size()
+	if same:
+		var k := 0
+		while k < pts_a.size():
+			if Vector2(pts_a[k]["p"]) != Vector2(pts_b[k]["p"]):
+				same = false
+				break
+			k += 1
+	print(("[respawn-proof] inset=(%.0f,%.0f) n=%d inside=%d/%d min_border=(%.1f,%.1f) " +
+		"min_clearance=%.1f inset_fallbacks=%d world_fallbacks=%d deterministic=%s") % [
+		inset.x, inset.y, RESPAWN_PROOF_N, inside, RESPAWN_PROOF_N,
+		min_border.x, min_border.y, min_clear, fallbacks, world_fallbacks, str(same)])
+
+
+func _respawn_proof_run(seed_value: int) -> Array:
+	var g = PSGame.new(cfg, tuning, seed_value)
+	g.start()
+	var out: Array = []
+	var k := 0
+	while k < RESPAWN_PROOF_N:
+		# Death in the top-left CORNER of the arena: the view centre is outside
+		# the inset, so the clamped base is exactly the inset corner (982,450) and
+		# every respawn has to prove that border.
+		if g.cam_targets.size() > 0:
+			g.cam_targets[0] = Vector2(80.0, 120.0)
+		g.cam_target = Vector2(80.0, 120.0)
+		g.kill_snake(g.player, null)
+		g.respawn_player()
+		var hd: Vector2 = g.player.body[0]
+		var clear := 1.0e18
+		var i := 0
+		while i < g.snakes.size():
+			var s = g.snakes[i]
+			i += 1
+			if s == g.player or not s.alive or s.body.size() == 0:
+				continue
+			clear = minf(clear, hd.distance_to(s.body[0]))
+		out.append({"p": hd, "clear": clear, "note": g.respawn_note})
+		k += 1
+	return out
+
+
+# ---------------------------------------------------------------- sfx probe
+#
+# `--capture-sfx` (2026-11-17, owner: 局内吃道具音频太密集，只播放自己的吃道具音效):
+# one scripted 20 s round on the REAL rules + the REAL `_drain_events` router,
+# counting the `audio.play()` requests per sound name. `--sfx=before` restores
+# the pre-fix routing (every snake's food / pickup / death asks for a blip), so
+# the two runs print the before/after density on identical events.
+#
+# Run it WINDOWED (no `--headless`): the mute check needs a real audio bus.
+#     godot --path . --fixed-fps 60 -- --capture-sfx --sfx=before
+#     godot --path . --fixed-fps 60 -- --capture-sfx
+#
+# The autopilot chases pellets, not pickups, so the probe also drops one powerup
+# on every living AI head once a second: that is the pickup channel the owner
+# complains about (7 AI x 20 s), and it makes the before/after pickup counts
+# meaningful. Routing only gates `audio.play`, never the rules, so the two runs
+# still simulate IDENTICAL events.
+const SFX_PROBE_SECONDS := 20.0
+const SFX_AI_PICKUP_EVERY := 1.0
+var _sfx_tag := "after"
+var _sfx_human_only := true
+var _sfx_step := 0
+var _sfx_t := 0.0
+var _sfx_ai_t := 0.0
+## Pickup EVENTS seen by the router, split by ownership (identical in both runs).
+var _sfx_pick_own := 0
+var _sfx_pick_ai := 0
+
+
+func _capture_sfx_tick(dt: float) -> void:
+	if _sfx_step == 0:
+		_sfx_t += dt
+		if _sfx_t > 0.5:
+			_sfx_step = 1
+			print("[sfx] begin mode=%s human_only=%s probe=%.0fs players=%d" % [
+				_sfx_tag, str(_sfx_human_only), SFX_PROBE_SECONDS,
+				game.players.size()])
+			_begin_countdown("sfx-probe")
+		return
+	if _sfx_step == 1:
+		if mode == MODE_PLAY:
+			_sfx_step = 2
+			_sfx_t = 0.0
+			print("[sfx] round start sim_t=0.000s")
+		return
+	_sfx_t += dt
+	if _sfx_t >= SFX_PROBE_SECONDS:
+		_sfx_step = 3
+		_sfx_report()
+		return
+	# Pickup-channel stress: one powerup on every living AI head each second, and
+	# one on the PLAYER's head as well, so the run proves BOTH halves of the rule:
+	# the AI pickups go silent and the player's own pickup still plays.
+	_sfx_ai_t += dt
+	if _sfx_ai_t >= SFX_AI_PICKUP_EVERY:
+		_sfx_ai_t = 0.0
+		var i := 0
+		while i < game.snakes.size():
+			var s = game.snakes[i]
+			i += 1
+			if not s.alive or s.body.size() == 0:
+				continue
+			game.spawn_powerup(&"boost" if (i & 1) == 0 else &"magnet",
+				s.body[0].x, s.body[0].y)
+
+
+## Print the density table and verify the mute contract. `req` = routing requests
+## (the same number the owner's unmuted box hears), `played` = what reached the
+## audio players on this host.
+func _sfx_report() -> void:
+	var req := audio.counts_text(false)
+	var played := audio.counts_text(true)
+	# Mute contract: with the player's mute ON, `play()` must not reach a player;
+	# with it OFF the very next call must. Also proves the player pool is alive.
+	audio.set_muted(true)
+	var p0: int = audio.played_total
+	audio.play(&"pickup")
+	var mute_ok: bool = audio.played_total == p0
+	audio.set_muted(false)
+	audio.play(&"pickup")
+	var unmute_ok: bool = audio.played_total == p0 + 1
+	print("[sfx] result mode=%s human_only=%s sim_t=%.1fs req: %s" % [
+		_sfx_tag, str(_sfx_human_only), _sfx_t, req])
+	print("[sfx] pickup events: own=%d ai=%d (routing: %s)" % [
+		_sfx_pick_own, _sfx_pick_ai,
+		"own only" if _sfx_human_only else "every snake"])
+	print("[sfx] played: %s" % played)
+	print("[sfx] mute: muted-block=%s unmuted-play=%s (buses=%d enabled=%s)" % [
+		str(mute_ok), str(unmute_ok), AudioServer.get_bus_count(),
+		str(audio.enabled)])
+	print("[capture] done")
+	get_tree().quit(0)
+
+
 # ------------------------------------------------------- pose steering trace
 #
 # `--capture-pose-trace` answers the owner's pose complaints with numbers instead
@@ -3830,9 +4322,26 @@ const PTRACE_NOISE_PX := 6.0
 ## angle = 90 - asin(0.75) = 41.41 deg, dist = 0.75 / sin(angle) = 1.1339 torso.
 const PTRACE_DOWN_OUT_ANGLE := 0.7227342478134157
 const PTRACE_DOWN_OUT_DIST := 1.1338934190276817
-## `hang_side`: PI/2 - asin(0.30) = 72.54 deg = 17.46 deg out of vertical, i.e.
+## [`hang_side`]: PI/2 - asin(0.30) = 72.54 deg = 17.46 deg out of vertical, i.e.
 ## abs(dx_n) = 0.30 of the vector - INSIDE the 26.7 deg cone, so it must hold.
 const PTRACE_HANG_SIDE_ANGLE := 1.2661036727794992
+## ---- 2026-11-17 speed-symmetry gestures -----------------------------------
+## The "arm at rest" of the non-reaching side: 0.35 torso from ITS OWN shoulder,
+## 51.6 deg down-and-outward. Below `pose.speed.near` (0.80), so it can never mask
+## a reach on the other side, and `dy_n` = 0.27 < `pose.hang_enter` (0.55), i.e.
+## it is a real resting arm, NOT a passive hanging one.
+const PTRACE_REST_DIST := 0.35
+const PTRACE_REST_ANGLE := 0.90
+const PTRACE_REST_ANGLE_L := 2.241592653589793  # PI - 0.90: the mirrored rest
+## The PASSIVE arm of the speed legs: straight down at 0.95 torso from its own
+## shoulder (`dy_n` 0.95, `align` 0, inside the hang cone). It must be EXCLUDED
+## from the speed max - a hanging arm is not a reach.
+const PTRACE_HANG_ARM_ANGLE := 1.5707963267948966
+const PTRACE_HANG_ARM_DIST := 0.95
+## The speed legs' reach: 0.95 torso is past `pose.speed.far` (0.92), i.e. the
+## max multiplier; the same number is used for every side so the comparison is
+## exactly "same extension amount".
+const PTRACE_REACH_DIST := 0.95
 ## [name, seconds, kind, p0, p1, dist, alt]
 ##   `dist` = |wrist - RIGHT SHOULDER| in TORSO lengths (the geometry of the
 ##   gesture; only kind 6 ignores it because the wrist sits on the chest).
@@ -3863,6 +4372,14 @@ const PTRACE_HANG_SIDE_ANGLE := 1.2661036727794992
 ##            (chest / overhead height) and the hanging cone (belly height) in the
 ##            MIDDLE of the sweep, which is exactly where the position-only holds
 ##            used to freeze the angle.
+##   kind 13 = DUAL static (2026-11-17 speed symmetry): RIGHT wrist at angle p0 /
+##            distance `dist`, LEFT wrist at angle p1 / distance leg[7] (torso
+##            units, each measured from its OWN shoulder). Steering still follows
+##            the right arm only; the speed reads the more extended arm.
+##   kind 14 = BOTH WRISTS ON THE CHEST: right exactly on the old chest point,
+##            left on its mirror (the neutral "hands on the chest" pose).
+##   kind 15 = RIGHT WRIST ON THE CHEST + LEFT arm at angle p1 / dist leg[7]
+##            (the "left arm hanging / bent while steering with the right" pose).
 const PTRACE_LEGS := [
 	["hand_at_chest", 2.00, 6, 0.0, 0.0, 0.0, NAN],
 	["arm_extend", 1.80, 7, 0.0, 0.95, 0.60, NAN],
@@ -3925,6 +4442,30 @@ const PTRACE_LEGS := [
 	# shoulder's own y level while the wrist is still left of it, i.e. the published
 	# angle crosses the +-PI wrap in the middle of the motion.
 	["sweep_fast_wrap", 1.65, 12, 0.30, -0.60, 1.30, 0.35],
+	# ---- 2026-11-17 SPEED-SYMMETRY pass (owner: 右手向右伸很快, 向左/向上伸就慢,
+	# 抬左臂完全没用): appended AFTER every existing leg, so the frames (and the
+	# shared RNG stream) of the legs above are untouched and `--pose-arms=before`
+	# stays byte-comparable on them.
+	#
+	# `speed_zero_*` put the speed at 0.65 (min) through the RIGHT arm at 0.80
+	# torso (the `near` point, outside the 0.70 dead zone) while the left arm
+	# hangs: the before-law can only start from a KNOWN low speed this way, since
+	# every hold freezes the target.
+	# Each reach then uses 0.95 torso for the reaching arm (past `far` = max) with
+	# the OTHER arm hanging straight down (a passive arm, excluded from the max).
+	["speed_zero_r", 1.20, 13, 0.0, PTRACE_HANG_ARM_ANGLE, 0.80, NAN, PTRACE_HANG_ARM_DIST],
+	["right_reach", 1.20, 13, 0.0, PTRACE_HANG_ARM_ANGLE, PTRACE_REACH_DIST, NAN, PTRACE_HANG_ARM_DIST],
+	["speed_zero_l", 1.20, 13, 0.0, PTRACE_HANG_ARM_ANGLE, 0.80, NAN, PTRACE_HANG_ARM_DIST],
+	["left_reach", 1.20, 13, PTRACE_HANG_ARM_ANGLE, PI, PTRACE_HANG_ARM_DIST, NAN, PTRACE_REACH_DIST],
+	["speed_zero_ur", 1.20, 13, 0.0, PTRACE_HANG_ARM_ANGLE, 0.80, NAN, PTRACE_HANG_ARM_DIST],
+	["arm_up_right", 1.20, 13, -PI * 0.5, PTRACE_HANG_ARM_ANGLE, PTRACE_REACH_DIST, NAN, PTRACE_HANG_ARM_DIST],
+	["speed_zero_ul", 1.20, 13, 0.0, PTRACE_HANG_ARM_ANGLE, 0.80, NAN, PTRACE_HANG_ARM_DIST],
+	["arm_up_left", 1.20, 13, PTRACE_HANG_ARM_ANGLE, -PI * 0.5, PTRACE_HANG_ARM_DIST, NAN, PTRACE_REACH_DIST],
+	["speed_zero_f", 1.20, 13, 0.0, PTRACE_HANG_ARM_ANGLE, 0.80, NAN, PTRACE_HANG_ARM_DIST],
+	["forward_reach", 1.20, 13, -0.20, PI + 0.20, 0.90, NAN, 0.90],
+	["chest", 1.20, 14, 0.0, 0.0, 0.0, NAN, 0.0],
+	["left_arm_hang", 1.20, 15, 0.0, PTRACE_HANG_ARM_ANGLE, 0.0, NAN, PTRACE_HANG_ARM_DIST],
+	["left_arm_bent", 1.20, 15, 0.0, PTRACE_REST_ANGLE, 0.0, NAN, PTRACE_REST_DIST],
 ]
 ## The step leg's settle window before the jump (frames).
 const PTRACE_STEP_SETTLE := 0.35
@@ -3983,6 +4524,15 @@ var _ptrace_pt_spd2 := 0.0
 var _ptrace_pt_pxsum := 0.0
 var _ptrace_pt_px2 := 0.0
 var _ptrace_pt_spd_n := 0
+## Speed-DISTANCE diagnostics (2026-11-17): the distance the curve consumed (the
+## more extended arm, or the right arm under `--pose-arms=before`), the left-arm
+## distance, and how often the LEFT arm was the one that won the max.
+var _ptrace_pt_ldnsum := 0.0
+var _ptrace_pt_ldn2 := 0.0
+var _ptrace_pt_sdnsum := 0.0
+var _ptrace_pt_sdn2 := 0.0
+var _ptrace_pt_sdn_n := 0
+var _ptrace_pt_arm1 := 0
 ## Per-leg raw wrist-minus-reference geometry (torso units), the numbers the
 ## arm-hanging gate reads: `dy_n` = wrist below the shoulder, `dx_n` = sideways.
 ## `hang` is the fraction of frames the gate held; `hflips` the state changes.
@@ -4040,9 +4590,10 @@ func _capture_pose_trace_tick() -> void:
 	var kind: int = int(leg[2])
 	var d_arm: float = float(leg[5])
 	var alt: float = float(leg[6])
+	var l_dist: float = float(leg[7]) if leg.size() > 7 else NAN
 	# ---- scripted hand for this frame ----
 	var kpts: Array = _ptrace_kpts(kind, _ptrace_leg_t, leg_dur, float(leg[3]),
-		float(leg[4]), d_arm, alt)
+		float(leg[4]), d_arm, alt, l_dist)
 	pose.ingest_test_skeleton(0, kpts, PTRACE_IMG_W, PTRACE_IMG_H, _ptrace_t)
 	var steer = pose.steers[0]
 	var ideal: float = _ptrace_ideal_angle(kind, _ptrace_leg_t, leg_dur,
@@ -4117,6 +4668,16 @@ func _capture_pose_trace_tick() -> void:
 		_ptrace_pt_pxsum += _ptrace_snake.speed
 		_ptrace_pt_px2 += _ptrace_snake.speed * _ptrace_snake.speed
 		_ptrace_pt_spd_n += 1
+		# Speed-distance diagnostics (2026-11-17): the arm the curve used and the
+		# left-arm distance, both settled so the table is steady state.
+		_ptrace_pt_ldnsum += m.last_left_dist_n
+		_ptrace_pt_ldn2 += m.last_left_dist_n * m.last_left_dist_n
+		if m.last_speed_dist_n >= 0.0:
+			_ptrace_pt_sdnsum += m.last_speed_dist_n
+			_ptrace_pt_sdn2 += m.last_speed_dist_n * m.last_speed_dist_n
+			_ptrace_pt_sdn_n += 1
+		if m.last_speed_arm == 1:
+			_ptrace_pt_arm1 += 1
 		if not held:
 			var e: float = _wrap_pi(pub - ideal)
 			_ptrace_pt_easum += e
@@ -4197,8 +4758,10 @@ func _ptrace_init() -> void:
 		% [_ptrace_ref_joint, _ptrace_tag])
 	_ptrace_lines.append("# image %dx%d px, torso %s px, keypoint jitter +-%.1f px rms/axis" % [
 		int(PTRACE_IMG_W), int(PTRACE_IMG_H), str(_ptrace_torso_px()), PTRACE_NOISE_PX])
-	_ptrace_lines.append("# reference: %s -> right wrist; right arm only (layout keys: see console)"
-		% [_ptrace_ref_joint])
+	_ptrace_lines.append("# reference: %s -> right wrist steering; speed = %s (layout keys: see console)" % [
+		_ptrace_ref_joint,
+		"max(|rwr-rsh|, |lwr-lsh|) / torso" if cfg.pose.speed.both_arms \
+			else "|rwr-rsh| / torso (before law)"])
 	_ptrace_lines.append("# law: wrist_smooth=%.3f s angle_smooth=%.3f s deadzone=%.3f exit=%.2fx"
 		% [cfg.pose.wrist_smooth, cfg.pose.angle_smooth, cfg.pose.deadzone,
 			cfg.pose.deadzone_exit])
@@ -4286,6 +4849,12 @@ func _ptrace_reset_leg_accum() -> void:
 	_ptrace_pt_pxsum = 0.0
 	_ptrace_pt_px2 = 0.0
 	_ptrace_pt_spd_n = 0
+	_ptrace_pt_ldnsum = 0.0
+	_ptrace_pt_ldn2 = 0.0
+	_ptrace_pt_sdnsum = 0.0
+	_ptrace_pt_sdn2 = 0.0
+	_ptrace_pt_sdn_n = 0
+	_ptrace_pt_arm1 = 0
 	_ptrace_pt_flips = 0
 	_ptrace_pt_pick1 = 0
 	_ptrace_pt_dysum = 0.0
@@ -4347,6 +4916,13 @@ func _ptrace_leg_end(leg: Array) -> void:
 		"px": _ptrace_pt_pxsum / float(maxi(1, _ptrace_pt_spd_n)),
 		"px_sd": _sd(_ptrace_pt_pxsum, _ptrace_pt_px2, _ptrace_pt_spd_n),
 		"spd_n": _ptrace_pt_spd_n,
+		# speed-distance diagnostics: which distance fed the curve, the left arm,
+		# and the share of settled frames the LEFT arm won the max.
+		"sdn": _ptrace_pt_sdnsum / float(maxi(1, _ptrace_pt_sdn_n)),
+		"sdn_sd": _sd(_ptrace_pt_sdnsum, _ptrace_pt_sdn2, _ptrace_pt_sdn_n),
+		"ldn": _ptrace_pt_ldnsum / float(maxi(1, _ptrace_pt_spd_n)),
+		"ldn_sd": _sd(_ptrace_pt_ldnsum, _ptrace_pt_ldn2, _ptrace_pt_spd_n),
+		"arm1": float(_ptrace_pt_arm1) / float(maxi(1, _ptrace_pt_spd_n)),
 		"flips": _ptrace_pt_flips,
 		"pick1": float(_ptrace_pt_pick1) / float(n),
 		"alt_err": rad_to_deg(_ptrace_pt_alt_sum / float(maxi(1, _ptrace_pt_alt_n))),
@@ -4384,7 +4960,7 @@ func _ptrace_finish() -> void:
 	print("[pose-trace] metric settle %.2f s; errors are signed: published - ideal"
 		% PTRACE_METRIC_SETTLE)
 	print("[pose-trace] leg                 dn(m+-sd)      dy_n   dx_n dz_h  hang  target(deg m+-sd)  "
-		+ "ang_err(m+-sd)  hdg_err(m+-sd)   hdg_d  flip hflip   spd(m+-sd)   px/s")
+		+ "ang_err(m+-sd)  hdg_err(m+-sd)   hdg_d  flip hflip   spd(m+-sd)  spd_dn   px/s")
 	for row in _ptrace_legs_out:
 		var en: int = int(row["err_n"])
 		var ang_s := "%7.2f+-%5.2f" % [float(row["ang"]), float(row["ang_sd"])]
@@ -4397,14 +4973,49 @@ func _ptrace_finish() -> void:
 			he_s = "     n/a (held)"
 		var why := String(row["reason"])
 		var tail := ("  reason=%s" % why) if why != "" else ""
-		# Speed curve output: a HELD leg does not evaluate the curve, it freezes the
-		# last target, so its multiplier is inherited from the gesture before it.
+		# Speed curve output: a HELD leg no longer freezes the target under the
+		# shipped two-arm law; under `--pose-arms=before` it still does, so its
+		# multiplier is inherited from the gesture before it.
 		var spd_s := "%6.3f+-%5.3f" % [float(row["spd"]), float(row["spd_sd"])]
-		print("[pose-trace] %-19s %6.3f+-%5.3f %6.3f %6.3f %5.2f %5.2f   %s   %s   %s %+7.1f %5d %5d   %s %6.1f%s" % [
+		print("[pose-trace] %-19s %6.3f+-%5.3f %6.3f %6.3f %5.2f %5.2f   %s   %s   %s %+7.1f %5d %5d   %s %6.3f %6.1f%s" % [
 			String(row["name"]), float(row["dn"]), float(row["dn_sd"]),
 			float(row["dy"]), float(row["dx"]), float(row["hold"]), float(row["hang"]),
 			ang_s, ae_s, he_s, float(row["hdg_d"]), int(row["flips"]),
-			int(row["hflips"]), spd_s, float(row["px"]), tail])
+			int(row["hflips"]), spd_s, float(row["sdn"]), float(row["px"]), tail])
+	# ---- SPEED SYMMETRY (2026-11-17, owner: 右手向右伸很快, 向左/向上伸就慢) ----
+	# Every reach below is the SAME 0.95-torso extension, only the side differs.
+	# Shipped: the speed reads the more extended arm (`spd_dn` = max of the two
+	# per-arm distances), so left/up must land on right. `--pose-arms=before`:
+	# right arm only + the steering holds freeze the target, i.e. the complaint.
+	var by_name := {}
+	for row in _ptrace_legs_out:
+		by_name[String(row["name"])] = row
+	if by_name.has("right_reach"):
+		var rr: float = float(by_name["right_reach"]["spd"])
+		print("[pose-trace] speed symmetry (settled frames; curve near=%.2f far=%.2f -> x%.2f..x%.2f):" % [
+			cfg.pose.speed.near, cfg.pose.speed.far,
+			cfg.pose.speed.min, cfg.pose.speed.max])
+		print("[pose-trace]   leg             right_dn  left_dn  spd_dn     spd     px/s  left_arm")
+		var order := ["right_reach", "left_reach", "arm_up_right", "arm_up_left",
+			"forward_reach", "chest", "left_arm_hang", "left_arm_bent"]
+		for nm in order:
+			if not by_name.has(nm):
+				continue
+			var row2 = by_name[nm]
+			print("[pose-trace]   %-14s %7.3f  %7.3f  %6.3f  %6.3f  %6.1f  %6.0f%%" % [
+				nm, float(row2["dn"]), float(row2["ldn"]), float(row2["sdn"]),
+				float(row2["spd"]), float(row2["px"]), float(row2["arm1"]) * 100.0])
+		var parts: Array = []
+		for nm in ["left_reach", "arm_up_left"]:
+			if by_name.has(nm):
+				var v: float = float(by_name[nm]["spd"])
+				var pct := 100.0 * (v / maxf(1e-6, rr) - 1.0)
+				parts.append("%s %+.1f%% of right_reach" % [nm, pct])
+		if by_name.has("chest"):
+			parts.append("chest %.3f (min %.3f)" % [
+				float(by_name["chest"]["spd"]), cfg.pose.speed.min])
+		print("[pose-trace]   %s | law=%s" % [" | ".join(parts),
+			"two-arm max" if cfg.pose.speed.both_arms else "before: right arm only"])
 	# ---- the fast sweeps: what the motion gate is for ----------------------
 	# Owner: 手快速从最左边移动到最右边时蛇没有转头. The key number is the heading
 	# change over the TRAVERSE window plus the fraction of that window the holds
@@ -4536,7 +5147,7 @@ func _ptrace_ideal_angle(kind: int, t: float, dur: float, p0: float, p1: float,
 		4:
 			# the left hand dithers, the right one holds p0: the target is p0
 			return p0
-		6:
+		6, 14, 15:
 			# the wrist sits on the old chest point: the geometric shoulder->chest
 			# angle is what the vector says, but the dead zone must HOLD here
 			var d: Vector2 = _game_px(_ptrace_chest_n()) - _game_px(PTRACE_RSHO)
@@ -4565,7 +5176,7 @@ func _game_px(p: Vector2) -> Vector2:
 ## the side, or at `alt` for the two-hand proof). Everything is built in GAME
 ## space and written back in provider space through the inverse of `_flip_x`.
 func _ptrace_kpts(kind: int, t: float, dur: float, p0: float, p1: float,
-		d_arm: float, alt: float) -> Array:
+		d_arm: float, alt: float, l_dist: float = NAN) -> Array:
 	var torso_px: float = _ptrace_torso_px()
 	var chest_n := _ptrace_chest_n()
 	var ga: float = _ptrace_ideal_angle(kind, t, dur, p0, p1, d_arm, alt)
@@ -4576,6 +5187,20 @@ func _ptrace_kpts(kind: int, t: float, dur: float, p0: float, p1: float,
 	if is_finite(alt):
 		ga_l = alt
 		d_l = PTRACE_LEFT_PROOF
+	if kind == 13:
+		# DUAL static (speed symmetry): p1 / `l_dist` are the left arm's own angle
+		# and distance from the LEFT shoulder. Both arms are scripted explicitly.
+		ga_l = p1
+		d_l = l_dist
+	elif kind == 14:
+		# Both wrists on the chest points: right on the old chest point, left on
+		# its mirror (the neutral "hands on the chest" pose).
+		pass
+	elif kind == 15:
+		# Right wrist on the chest, left arm at p1 / `l_dist` from the LEFT
+		# shoulder (the "left arm hanging / bent while steering with the right").
+		ga_l = p1
+		d_l = l_dist
 	if kind == 4:
 		# The proof pose: the left hand is FURTHER from the chest than the right
 		# one, at 180 deg to it. The auto-pick therefore sits on the LEFT wrist,
@@ -4594,9 +5219,14 @@ func _ptrace_kpts(kind: int, t: float, dur: float, p0: float, p1: float,
 		_ptrace_rng.rand_range(-PTRACE_NOISE_PX, PTRACE_NOISE_PX))
 	var wr_g: Vector2 = sho_g + Vector2(cos(ga), sin(ga)) * (d_r * torso_px)
 	var wl_g: Vector2 = lsho_g + Vector2(cos(ga_l), sin(ga_l)) * (d_l * torso_px)
-	if kind == 6:
+	if kind == 6 or kind == 14 or kind == 15:
 		# (a) hand resting ON the chest: the exact point the old law steered around
 		wr_g = _game_px(chest_n)
+		if kind == 14:
+			# ...and the left arm mirrors it across the body's centre line.
+			var chest_g: Vector2 = _game_px(chest_n)
+			var off := chest_g - sho_g
+			wl_g = lsho_g + Vector2(-off.x, off.y)
 	elif kind == 12:
 		# straight-line sweep: y from p0 to p1 (torso offsets), x from -dist to
 		# +dist, over `alt` seconds starting at PTRACE_METRIC_SETTLE. The scripted

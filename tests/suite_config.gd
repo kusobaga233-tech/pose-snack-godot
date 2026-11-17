@@ -111,6 +111,18 @@ static func run(t) -> void:
 	# here (the count stays 444) and the rule is measured, not guessed:
 	# evidence/pose-trace-hang-{before,after}.txt + evidence/hang-hold-20261114.md.
 	t.eq_float("pose deadzone", cfg.pose.deadzone, 0.70)
+	# 2026-11-17 (owner: 左/上伸手偏慢): the speed distance is now the more
+	# extended arm. The curve itself (near/far/min/max) is unchanged, and the
+	# `both_arms` switch is the only new knob (false = the measured pre-fix law).
+	t.ok("pose speed reads both arms (max)", cfg.pose.speed.both_arms)
+	# 2026-11-17 (owner: 复活点不要贴着墙): half of the shipped 1P camera span
+	# (1963.6 x 900) is 981.8 x 450, rounded up to 982 x 450 so the inset is
+	# never less than half a screen. The clearance numbers are the pre-inset ones.
+	t.ok("respawn inset 982x450 (half a 1P screen)",
+		cfg.player.respawn_inset == Vector2(982.0, 450.0))
+	t.ok("respawn clearance 1100 human / 1200 AI (unchanged)",
+		cfg.player.respawn_clear_human == 1100.0 \
+			and cfg.player.respawn_clear_ai == 1200.0)
 	# (min/max merged, near/far merged, immunity/freeze merged: the count stays
 	# 444 while the two new pose blocks below get pinned. The merged halves still
 	# assert the same defaults as before.)

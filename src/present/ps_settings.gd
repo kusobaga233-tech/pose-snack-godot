@@ -9,7 +9,8 @@ extends RefCounted
 ##
 ## Sections / keys:
 ##
-##     [skin]  player       character slug            (ps_skins.gd)
+##     [skin]  player       character slug, or "!default"    (ps_skins.gd)
+##                          (= 默认: the web original's procedural player snake)
 ##     [audio] muted        true = SFX off            (this file)
 ##     [round] best_length  historical best length    (this file)
 ##     [round] mode         "timed" / "endless"       (this file)

@@ -385,6 +385,8 @@ var _slab_top: StyleBoxFlat = null
 var _ps_btn: StyleBoxFlat = null
 var _ps_btn_hi: StyleBoxFlat = null
 var _badge_style: StyleBoxFlat = null
+## The picker's 默认 chip (`网页原版` next to the name), lime like the player.
+var _def_tag_style: StyleBoxFlat = null
 var _pause_strip: StyleBoxFlat = null
 var _pause_cell_style: StyleBoxFlat = null
 var _pause_key: StyleBoxFlat = null
@@ -468,6 +470,10 @@ func _ready() -> void:
 	_ps_btn_hi.border_width_bottom = 3
 	_badge_style = PSTheme.panel(Color(0.337, 0.910, 1.0, 0.07), PSTheme.TV_LINE_SOFT,
 		PSTheme.R_BADGE, 1)
+	# 默认 chip: lime, one step louder than a meta badge, because it is the
+	# affordance that says "this is the default, not a manual pick".
+	_def_tag_style = PSTheme.panel(Color(182.0 / 255.0, 1.0, 87.0 / 255.0, 0.14),
+		PSTheme.with_a(PSTheme.LIME, 0.55), PSTheme.R_BADGE, 1)
 	# NB: StyleBoxFlat has a single `border_color`; the *accent* edges (the 4 px
 	# lime band-cell edges, the 4 px cyan pause-strip left edge, the 3 px cyan
 	# leaderboard top edge) are drawn as explicit rects in the draw path.
@@ -1309,13 +1315,24 @@ func _draw_help() -> void:
 ## `角色 [◀] (portrait) 辣椒蛇 [▶]` — the player's character picker, under the
 ## mode cards on the select screen.
 ##
+## The picker starts on the virtual **默认** entry (the web original's player
+## snake): its portrait is the procedural head the world view draws for a snake
+## with no character-pack art, its name is 默认, and a small lime 网页原版 chip
+## says what that means. A specific pick shows that character's atlas portrait
+## and name, with no chip — so "default" and "manual pick" never look alike.
+##
 ## Remote-first: the row is focus slot 2 (`SKIN_FOCUS`), reached with DOWN from the
 ## two mode cards; while it is focused LEFT/RIGHT step the character and the rest
-## of the menu keeps its old key handling untouched. The portrait is four region
-## blits out of the character's head atlas (head, eyes, mouth, decor) — the same
+## of the menu keeps its old key handling untouched. The character portrait is
+## four region blits out of the head atlas (head, eyes, mouth, decor) — the same
 ## regions the world view samples, so the row shows exactly what the snake is.
 const SKIN_FOCUS := 2
 const SKIN_ROW_H := 48.0
+## The 默认 chip: 16 px CJK inside a 24 px pill, sized from its own text. The row
+## has 182 px between the portrait and the right arrow — name + chip fit with
+## room to spare (52 + 8 + 82 = 142).
+const DEF_TAG_SZ := 16
+const DEF_TAG_PAD := 9.0
 
 
 func _draw_skin_row(cx: float, y: float) -> void:
@@ -1323,7 +1340,9 @@ func _draw_skin_row(cx: float, y: float) -> void:
 		return
 	var row := Rect2(cx - 186.0, y, 372.0, SKIN_ROW_H)
 	var hot: bool = select_focus == SKIN_FOCUS
+	var is_def: bool = PSSkins.player_skin < 0
 	var sk: int = PSSkins.player_skin
+	# -1 returns the virtual 默认 entry: lime accent + 默认 name, no atlas.
 	var skd: Dictionary = PSSkins.get_skin(sk)
 	var accent: Color = skd.get("halo", PSTheme.CYAN)
 	if hot:
@@ -1338,9 +1357,30 @@ func _draw_skin_row(cx: float, y: float) -> void:
 	_skin_arrow(Rect2(row.position.x + 322.0, row.position.y + 10.0, 30.0, 28.0), 1, hot)
 	# the head base is 130 atlas texels tall; 34 px keeps head + decor + mouth
 	# inside the 48 px row when the anchor sits 25 px down
-	_draw_skin_face(Vector2(row.position.x + 118.0, row.position.y + 25.0), sk, 34.0, 1.0)
-	PSTheme.text_tc(self, row.position.x + 236.0, row.position.y + 33.0,
-		String(skd.get("name", "?")), 26, PSTheme.LIME if hot else PSTheme.TEXT, 1.0)
+	var portrait := Vector2(row.position.x + 118.0, row.position.y + 25.0)
+	if is_def:
+		_draw_proc_face(portrait, 34.0, 1.0)
+	else:
+		_draw_skin_face(portrait, sk, 34.0, 1.0)
+	# name (+ 默认 chip) centred as one group on the row's optical centre, so a
+	# short 默认 and a long 3-4 glyph character name both sit where the eye looks.
+	var nm: String = String(skd.get("name", "?"))
+	var nm_w: float = PSTheme.measure_t(nm, 26, 1.0).x
+	var tag := ""
+	var tag_w := 0.0
+	if is_def:
+		tag = _cn("网页原版", "WEB")
+		tag_w = ceilf(PSTheme.measure_t(tag, DEF_TAG_SZ, 1.0).x) + DEF_TAG_PAD * 2.0
+	var x0: float = row.position.x + 236.0 - nm_w * 0.5
+	if is_def:
+		x0 -= (8.0 + tag_w) * 0.5
+	PSTheme.text_t(self, Vector2(x0, row.position.y + 33.0), nm, 26,
+		PSTheme.LIME if hot else PSTheme.TEXT, 1.0)
+	if is_def:
+		var tr := Rect2(x0 + nm_w + 8.0, row.position.y + 12.0, tag_w, 24.0)
+		draw_style_box(_def_tag_style, tr)
+		PSTheme.text_vcc(self, tr.get_center().x, tr.get_center().y, tag,
+			DEF_TAG_SZ, PSTheme.LIME)
 
 
 func _skin_arrow(r: Rect2, dir: int, hot: bool) -> void:
@@ -1355,6 +1395,54 @@ func _skin_arrow(r: Rect2, dir: int, hot: bool) -> void:
 	else:
 		draw_colored_polygon(PackedVector2Array([c + Vector2(-h, -h),
 			c + Vector2(-h, h), c + Vector2(h, 0.0)]), col)
+
+
+## Portrait of the **默认** entry: the web original's player head, drawn from the
+## same primitives as the world view's procedural player head
+## (`ps_world_view.gd:_draw_player_head`) — there is no atlas crop for it.
+##
+## Orientation matches every character portrait in this row: the pack canvas has
+## the head at the bottom facing +Y, so the drawn head faces DOWN (eyes side by
+## side across x, mouth + tongue in the lower half). `anchor` is the same
+## bottom-centre anchor the atlas portraits use and `head_h` the same head
+## height, so the two kinds of portrait occupy one box.
+##
+## Palette: the player snake's own `B6FF57` head (`core/config.gd` player 1),
+## white eyes with dark pupils + a glint, the `FF3D6E` tongue flick.
+func _draw_proc_face(anchor: Vector2, head_h: float, alpha: float) -> void:
+	var a: float = clampf(alpha, 0.0, 1.0)
+	if a <= 0.003 or head_h <= 1.0:
+		return
+	var r: float = head_h * 0.5
+	var c: Vector2 = anchor + Vector2(0.0, head_h * 0.08)
+	var base := Color(182.0 / 255.0, 1.0, 87.0 / 255.0, a)
+	# head disc: dark rim first, because the pack art carries its own outline
+	draw_circle(c, r * 1.06, Color(0.02, 0.09, 0.11, 0.70 * a))
+	draw_circle(c, r, base)
+	draw_circle(c + Vector2(-r * 0.24, -r * 0.42), r * 0.44, Color(1.0, 1.0, 1.0, 0.16 * a))
+	# mouth + tongue (forward = down). Idle pose: the same thin smile arc the world
+	# view draws when the mouth is closed (`max(1.5, 4*zoom)` at hr=42 is ~0.10 r,
+	# so at this size it must stay a hairline or it reads as a moustache), with the
+	# pink fork flicking out just below it. Kept inside the 48 px row.
+	draw_arc(c + Vector2(0.0, r * 0.42), r * 0.42, PI * 0.325, PI * 0.675, 12,
+		Color(0.05, 0.24, 0.14, 0.92 * a), maxf(1.5, r * 0.10), false)
+	var pink := Color(1.0, 0.239, 0.431, a)
+	var t0 := c + Vector2(0.0, r * 0.80)
+	var t1 := t0 + Vector2(0.0, r * 0.22)
+	draw_line(t0, t1, pink, maxf(1.5, r * 0.12))
+	draw_line(t1, t1 + Vector2(r * 0.13, r * 0.12), pink, maxf(1.2, r * 0.09))
+	draw_line(t1, t1 + Vector2(-r * 0.13, r * 0.12), pink, maxf(1.2, r * 0.09))
+	# eyes: side by side across the head, looking forward (down); the glint sits on
+	# the same side of both pupils so the face stays symmetric
+	var eye_r: float = r * 0.32
+	for si in 2:
+		var sgn: float = -1.0 if si == 0 else 1.0
+		var ep := c + Vector2(sgn * r * 0.53, r * 0.31)
+		draw_circle(ep, eye_r, Color(1.0, 1.0, 1.0, a))
+		draw_circle(ep + Vector2(0.0, eye_r * 0.12), eye_r * 0.55,
+			Color(0.08, 0.13, 0.06, a))
+		draw_circle(ep + Vector2(eye_r * 0.20, -eye_r * 0.14), eye_r * 0.18,
+			Color(1.0, 1.0, 1.0, 0.95 * a))
 
 
 ## Portrait out of the character's head atlas. `anchor` is where the pack's head
@@ -1624,8 +1712,10 @@ func _draw_ready_bar(cr: Rect2, col: Color, fill: float, is_ready: bool) -> void
 
 
 ## The reference's `headIcon` (100 x 100, `imgIcon` = the character's head): the
-## port's stand-in is the same head-atlas portrait the mode-select skin row uses,
-## inside the slot-coloured ring. Drawn last so it overlaps the card's top edge.
+## port's stand-in is the same portrait the mode-select skin row uses, inside the
+## slot-coloured ring. A player on **默认** has no character art, so the icon is
+## the procedural web-original head — i.e. the card shows what the round draws.
+## Drawn last so it overlaps the card's top edge.
 func _draw_ready_head_icon(cr: Rect2, i: int, col: Color) -> void:
 	var c := Vector2(cr.get_center().x,
 		cr.position.y - READY_ICON * 0.5 + READY_FRAME + READY_ICON_OVER)
@@ -1637,7 +1727,10 @@ func _draw_ready_head_icon(cr: Rect2, i: int, col: Color) -> void:
 		sk = PSSkins.of(game.snakes[i])
 	# the head base is anchored at its bottom-centre: 54 px tall, 27 px down from
 	# the circle's centre, keeps head + decor inside the 100 px ring
-	_draw_skin_face(c + Vector2(0.0, 27.0), sk, 54.0, 1.0)
+	if PSSkins.usable(sk):
+		_draw_skin_face(c + Vector2(0.0, 27.0), sk, 54.0, 1.0)
+	else:
+		_draw_proc_face(c + Vector2(0.0, 27.0), 54.0, 1.0)
 
 
 func _draw_corner_brackets(r: Rect2, col: Color) -> void:

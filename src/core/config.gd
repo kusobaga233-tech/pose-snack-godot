@@ -325,6 +325,24 @@ class PlayerCfg extends RefCounted:
 	var respawn_freeze: float = 0.5
 	var respawn_freeze_min: float = 0.0
 	var respawn_freeze_max: float = 1.5
+	## ---- respawn border inset (owner 2026-11-17: 复活点不要贴着墙) ------------
+	## A respawn must sit at least HALF A SCREEN away from the arena border, i.e.
+	## inside the arena inset by half the visible extent. The 1P camera span is
+	## 1963.6 x 900 world px (short edge = CAM_SPAN 900, long edge follows the
+	## 1920x880 arena aspect), so half of it is 981.8 x 450. Both halves are
+	## rounded UP here (982 / 450) so the inset is literally never less than half
+	## a screen: the owner's "~960x440" is the unfudged design-canvas half.
+	## `PSGame.respawn_point()` searches inside this inset; `Vector2.ZERO` (or any
+	## non-positive edge) restores the pre-inset random rule, which is only used
+	## by the measurement harness (`--capture-respawn --respawn=before`).
+	## This is a rule tunable, not a presentation value: the core does not know
+	## the camera, it knows the arena the owner wants the snake kept inside.
+	var respawn_inset: Vector2 = Vector2(982.0, 450.0)
+	## Minimum distance from a respawn point to every LIVING snake head (world px).
+	## Both keep the pre-inset clearance values: humans 1100 (the JS rule), AI 1200
+	## ("AI respawns somewhere far away"). Nothing else about the clearance changed.
+	var respawn_clear_human: float = 1100.0
+	var respawn_clear_ai: float = 1200.0
 
 
 class CollideCfg extends RefCounted:
@@ -387,6 +405,19 @@ class PoseSpeedCfg extends RefCounted:
 	var far_min: float = 0.40
 	var far_max: float = 2.00
 	var smooth_max: float = 0.60
+	## ---- symmetric speed distance (owner 2026-11-17: 左/上伸手比右慢) ---------
+	## `true` (shipped): the distance that feeds the curve is
+	##     max(|rwr - rsh|, |lwr - lsh|) / torso
+	## i.e. the MORE EXTENDED arm, with an arm that is below `pose.min_visibility`
+	## or that is a PASSIVE hanging arm (same posture test as the steering
+	## `pose.hang_*` gate, applied per arm) left out of the max. Steering stays
+	## right-wrist/right-shoulder only; the dead zone / hang / motion gates are
+	## steering gates and no longer freeze the speed target.
+	## `false` is the pre-fix law on the same gestures (right arm only, and the
+	## steering holds still freeze the target): measurement only, wired to
+	## `--capture-pose-trace --pose-arms=before`. Evidence:
+	## `evidence/pose-trace-speed-arms-{before,after}.txt`.
+	var both_arms: bool = true
 
 
 class PoseBindCfg extends RefCounted:

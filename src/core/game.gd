@@ -133,6 +133,20 @@ var cam_target: Vector2 = Vector2.ZERO
 ## One focus point per human snake (split screen).
 var cam_targets: Array = []
 
+## ---- respawn diagnostics (shell logging only; the core never prints) --------
+## Increments on every respawn (human or AI), so a shell can log once per event.
+var respawn_count: int = 0
+## Why the newest respawn left the requested inset: "" = the preferred point was
+## accepted, "inset-fallback" = the closest SAFE inset grid point (the preferred
+## candidates were all blocked), "world-fallback" = the WHOLE inset was blocked,
+## so the closest safe point in the legacy spawn field was used (outside the
+## inset; see `respawn_point`).
+var respawn_note: String = ""
+## Where that fallback placed the snake (the shell quotes it in the log line).
+var respawn_note_point: Vector2 = Vector2.ZERO
+## `respawn_count` the note belongs to (-1 = no note yet).
+var respawn_note_count: int = -1
+
 # ---------------------------------------------------------------- diagnostics
 
 var stat_food_spawned: int = 0
@@ -810,21 +824,35 @@ func kill_snake(snake, killer, eaten: bool = false) -> void:
 
 
 ## Human respawn: back to the starting length somewhere far away, with freeze.
+##
+## 2026-11-17 (owner: 复活点不要贴着墙): the point now comes from
+## `respawn_point()`, i.e. inside the half-a-screen border inset and as near the
+## CURRENT view centre (the frozen `cam_targets` of this player) as the clearance
+## allows. Everything else about the respawn is unchanged: starting length, the
+## inward heading, the immunity window, the freeze, the camera target hand-off
+## and the 复活 event.
 func respawn_player(snake = null) -> void:
 	if snake == null:
 		snake = player
-	var p := spawn_point(1100.0)
+	var idx: int = snake.player_index
+	var centre: Vector2 = cam_target if idx < 0 or idx >= cam_targets.size() \
+		else cam_targets[idx]
+	var p := respawn_point(cfg.player.respawn_clear_human, centre)
 	snake.reset(p.x, p.y, inward_heading(p.x, p.y), cfg.snake.start_segments)
 	snake.immune_until = time + cfg.player.immunity
 	apply_spawn_freeze(snake)
 	if snake.player_index >= 0 and snake.player_index < cam_targets.size():
 		cam_targets[snake.player_index] = p
 	events.push_text(p.x, p.y - 80.0, "复活", snake.color, 48.0)
+	_note_respawn()
 
 
 ## AI respawn: same rules, slightly shorter immunity, fresh decision state.
+## The inset applies here too (no respawn may hug the border), but the AI keeps
+## its "somewhere far away" rule: `prefer_centre = false`, so the point is a
+## uniform sample inside the inset instead of a point near the player's view.
 func respawn_ai(snake) -> void:
-	var p := spawn_point(1200.0)
+	var p := respawn_point(cfg.player.respawn_clear_ai, cam_target, false)
 	snake.reset(p.x, p.y, inward_heading(p.x, p.y), cfg.snake.start_segments)
 	snake.immune_until = time + 0.9
 	apply_spawn_freeze(snake)
@@ -834,6 +862,162 @@ func respawn_ai(snake) -> void:
 			brains[i].reset_for_new_round()
 			break
 		i += 1
+	_note_respawn()
+
+
+## Bump the respawn counter and remember the fallback reason (if any) so the
+## shell can print one line per respawn.
+func _note_respawn() -> void:
+	respawn_count += 1
+	if respawn_note != "":
+		respawn_note_count = respawn_count
+
+
+# ---------------------------------------------------------------- respawn point
+#
+# 2026-11-17 (owner: 复活点不要贴着墙, 而且不要镜头长距离平移):
+#
+#   * a respawn must be at least HALF A SCREEN away from the arena border, i.e.
+#     inside `cfg.player.respawn_inset` (982 x 450 world px for the shipped 1P
+#     camera span of 1963.6 x 900);
+#   * a human respawn is preferably near the CENTRE OF THE CURRENT VIEW (the
+#     frozen `cam_targets` entry of that player), so the respawned snake is
+#     already on screen and the camera only has to snap, never pan;
+#   * the existing clearance rule is kept verbatim: at least `min_dist` from
+#     every LIVING snake head. `PSGame.spawn_point()` never tested food or
+#     powerups, and neither does this (their own spawners keep their distance).
+#
+# Resolution order, all deterministic (seeded world rng, no wall clock):
+#   1. `prefer_centre`: a golden-angle spiral around the clamped view centre,
+#      radius 0 -> ~780 px; the first SAFE point wins, so the respawn stays on
+#      screen whenever the view centre itself is clear.
+#   2. humans: the SAFE grid point inside the inset CLOSEST to the view centre
+#      (`respawn_note = "inset-fallback"`). AI (`prefer_centre = false`) keeps
+#      the pre-inset random shape: up to RESPAWN_TRIES uniform samples inside
+#      the inset, then the same closest-safe grid point.
+#   3. the whole inset is blocked: the safe grid point in the legacy spawn field
+#      closest to the view centre (`respawn_note = "world-fallback"`, i.e. the
+#      only case that places OUTSIDE the inset). The shell logs it.
+#   4. nothing safe anywhere: the old "near the world centre" fallback, so a
+#      respawn can never fail.
+
+## Uniform tries inside the inset before the expensive grid fallback.
+const RESPAWN_TRIES := 40
+## World border the legacy spawn field keeps (`spawn_point`'s 280 px margin).
+const RESPAWN_MARGIN := 280.0
+## Grid step of the closest-safe-point fallback (px). It only runs when every
+## random candidate is blocked; 90 px is finer than a snake radius.
+const RESPAWN_GRID := 90.0
+
+
+## A respawn point: inside `cfg.player.respawn_inset`, at least `min_dist` from
+## every living snake head, and (when `prefer_centre`) as near `centre` as the
+## inset + clearance allow. See the block comment above for the resolution order.
+func respawn_point(min_dist: float, centre: Vector2, prefer_centre: bool = true) -> Vector2:
+	respawn_note = ""
+	var inset: Vector2 = cfg.player.respawn_inset
+	if inset.x <= 0.0 or inset.y <= 0.0:
+		# Inset disabled (`--capture-respawn --respawn=before`): the pre-inset rule.
+		return spawn_point(min_dist)
+	var lo := Vector2(maxf(RESPAWN_MARGIN, inset.x), maxf(RESPAWN_MARGIN, inset.y))
+	var hi := Vector2(minf(world_w - RESPAWN_MARGIN, world_w - inset.x),
+		minf(world_h - RESPAWN_MARGIN, world_h - inset.y))
+	if hi.x < lo.x or hi.y < lo.y:
+		# Inset wider than the spawn field (a misconfiguration, or a harness that
+		# shrank the world): keep the legacy rule instead of failing to spawn.
+		return spawn_point(min_dist)
+	var base := Vector2(clampf(centre.x, lo.x, hi.x), clampf(centre.y, lo.y, hi.y))
+	if prefer_centre and is_finite(centre.x) and is_finite(centre.y):
+		# Golden-angle spiral: 0, 260, 368, 450, 520, 582, 637, 688, 735 px. The
+		# first SAFE point wins, so the natural answer (the view centre itself) is
+		# tried first and a blocked centre moves the respawn outward gradually.
+		for k in 9:
+			var rad := 0.0 if k == 0 else 260.0 * sqrt(float(k))
+			var ang := float(k) * 2.399963229728653
+			var c := Vector2(base.x + cos(ang) * rad, base.y + sin(ang) * rad)
+			c.x = clampf(c.x, lo.x, hi.x)
+			c.y = clampf(c.y, lo.y, hi.y)
+			if respawn_safe(c, min_dist):
+				return c
+		# Owner: "if no candidate satisfies the inset, fall back to the point
+		# closest to the current camera centre that is still safe". For a HUMAN
+		# that is this grid point - deliberately NOT a uniform draw, because a
+		# random point across the arena is exactly the long camera travel (and the
+		# lost player) this rule exists to avoid.
+		var p_in := _closest_safe_grid(base, lo, hi, RESPAWN_GRID, min_dist)
+		if p_in.x >= 0.0:
+			respawn_note = "inset-fallback"
+			respawn_note_point = p_in
+			return p_in
+	else:
+		# AI keeps its "somewhere far away" rule: uniform samples inside the inset.
+		var t := 0
+		while t < RESPAWN_TRIES:
+			var c2 := Vector2(rng.rand_range(lo.x, hi.x), rng.rand_range(lo.y, hi.y))
+			if respawn_safe(c2, min_dist):
+				return c2
+			t += 1
+		var p_in2 := _closest_safe_grid(base, lo, hi, RESPAWN_GRID, min_dist)
+		if p_in2.x >= 0.0:
+			respawn_note = "inset-fallback"
+			respawn_note_point = p_in2
+			return p_in2
+	# The whole inset is blocked: the closest safe point anywhere in the legacy
+	# spawn field. This is the only path that places outside the inset.
+	respawn_note = "world-fallback"
+	respawn_note_point = base
+	var p_out := _closest_safe_grid(base,
+		Vector2(RESPAWN_MARGIN, RESPAWN_MARGIN),
+		Vector2(world_w - RESPAWN_MARGIN, world_h - RESPAWN_MARGIN),
+		RESPAWN_GRID, min_dist)
+	if p_out.x >= 0.0:
+		respawn_note_point = p_out
+		return p_out
+	# Nothing safe anywhere (8 snakes covering the map): the old centre fallback.
+	return Vector2(
+		clampf(world_w * 0.5 + rng.rand_range(-300.0, 300.0),
+			RESPAWN_MARGIN, world_w - RESPAWN_MARGIN),
+		clampf(world_h * 0.5 + rng.rand_range(-300.0, 300.0),
+			RESPAWN_MARGIN, world_h - RESPAWN_MARGIN))
+
+
+## True when `p` keeps `min_dist` from every living snake head. The snake being
+## respawned is dead at this point, so it can never block its own respawn.
+func respawn_safe(p: Vector2, min_dist: float) -> bool:
+	var min_d2 := min_dist * min_dist
+	var i := 0
+	while i < snakes.size():
+		var s = snakes[i]
+		i += 1
+		if not s.alive or s.body.size() == 0:
+			continue
+		var h: Vector2 = s.body[0]
+		var dx := p.x - h.x
+		var dy := p.y - h.y
+		if dx * dx + dy * dy < min_d2:
+			return false
+	return true
+
+
+## Grid scan of `[lo, hi]` for the safe point closest to `centre`; returns
+## (-1,-1) when the rectangle holds no safe point. Row-major from `lo`, so the
+## tie-break is deterministic as well.
+func _closest_safe_grid(centre: Vector2, lo: Vector2, hi: Vector2, step: float,
+		min_dist: float) -> Vector2:
+	var best := Vector2(-1.0, -1.0)
+	var best_d2 := INF
+	var y := lo.y
+	while y <= hi.y + 0.001:
+		var x := lo.x
+		while x <= hi.x + 0.001:
+			var c := Vector2(x, y)
+			var d2 := c.distance_squared_to(centre)
+			if d2 < best_d2 and respawn_safe(c, min_dist):
+				best_d2 = d2
+				best = c
+			x += step
+		y += step
+	return best
 
 
 # ---------------------------------------------------------------- powerups

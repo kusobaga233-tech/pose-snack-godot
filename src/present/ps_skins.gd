@@ -12,8 +12,17 @@ extends RefCounted
 ##     settings file before this),
 ##   * deal the characters the player did not pick to the AI snakes **once per
 ##     round**: distinct among the visible snakes, stable for the whole round,
-##     re-rolled on the next one.  The pool is `count() - 1` (the player's pick
-##     excluded), so adding a character just widens it.
+##     re-rolled on the next one.  The pool is `count()` minus the player's real
+##     pick (or all of `count()` for **默认**), so adding a character just
+##     widens it.
+##
+## **默认** (owner: 所谓默认角色是指原来网页中的玩家控制角色形象) is the picker's
+## virtual first entry and is *not* a character from the pack. It means "no
+## character": `player_skin == -1`, which is exactly the value the world view has
+## always drawn as the outgoing web prototype's player snake — the green
+## `B6FF57` ramp body plus the drawn procedural head (eyes, tongue, smile). So
+## 默认 is a first-class state with no art of its own, not an alias of
+## `A1_spicy`.
 ##
 ## Assignment is stored as `ps_skin` metadata on the snake object
 ## (`Object.set_meta`), so `src/core/**` stays untouched and the world view, the
@@ -24,12 +33,21 @@ const PSData = preload("res://src/present/ps_skin_data.gd")
 const SETTINGS_PATH := "user://pose_snake.cfg"
 const META := &"ps_skin"
 
+## The persisted value of the **默认** pick. It can never collide with a pack
+## slug (`index_of_slug` only knows the generated table), and it makes "fresh
+## install" and "the owner explicitly chose 默认" the same state on disk.
+const DEFAULT_SLUG := "!default"
+## Display name of the virtual entry (the picker row and the boot/step logs).
+const DEFAULT_NAME := "默认"
+
 static var ready := false
 ## Prepared entries: the generated dict plus `regions` (Rect2 + offset Vector2)
 ## and the two loaded textures.
 static var skins: Array = []
-## Index into `skins` of the character the player picked.
-static var player_skin := 0
+## The player's character: an index into `skins`, or **-1 for 默认** (the web
+## original's procedural player snake). The picker index space is therefore
+## `-1, 0, 1, ... count()-1`: 默认 first, then the table in pack order.
+static var player_skin := -1
 static var _settings_loaded := false
 static var _warned: Dictionary = {}
 ## Number of characters that failed to load (the world view uses it once to
@@ -73,11 +91,69 @@ static func _load_tex(path: String, slug: String) -> Texture2D:
 	return null
 
 
+# ------------------------------------------------------- the virtual 默认 entry
+## The **默认** entry, shaped exactly like a `PSData.LIST` entry (plus
+## `default: true`) so every reader — the picker row, the ready-card portrait,
+## the minimap, the settlement stage, `main.gd`'s boot/step log — can go through
+## `get_skin()` and never needs a special case. `usable()` is false because it
+## has no atlas, and that single fact is how `ps_world_view` knows to draw the
+## procedural head/body for it.
+##
+## Palette = the web original's player snake (`core/config.gd`: player 1 has
+## colour/head `B6FF57` and the body ramp `B6FF57 -> 5BEFA0 -> 2FD6C8 -> 1FA8D8`),
+## so the picker's left accent edge and the minimap dot match the snake it means.
+##
+## Built once, lazily, so a per-frame `get_skin(-1)` in the HUD/world view costs
+## a Dictionary read instead of an allocation. Handed out read-only: no caller
+## mutates a skin dict.
+static var _default_skin: Dictionary = {}
+
+
+static func default_skin() -> Dictionary:
+	if _default_skin.is_empty():
+		_default_skin = {
+			"slug": DEFAULT_SLUG,
+			"name": DEFAULT_NAME,
+			"full": "网页原版 · 默认",
+			"default": true,
+			"rim": Color("1F5F1A"),
+			"halo": Color("B6FF57"),
+			"dot": Color("B6FF57"),
+			"tint": Color("5BEFA0"),
+			"regions": {},
+		}
+	return _default_skin
+
+
+## True when the player picked **默认** (the procedural web-original snake).
+static func is_default() -> bool:
+	return player_skin < 0
+
+
+# ---------------------------------------------------------------- picker space
+## Picker positions: 0 is **默认**, `1..count()` are `skins[0..count()-1]`.
+static func picker_count() -> int:
+	return skins.size() + 1
+
+
+static func picker_pos() -> int:
+	return player_skin + 1
+
+
+## How many characters the AI may be dealt this round: every character for
+## **默认** (`count()`), every character but the player's for a real pick
+## (`count() - 1`).
+static func ai_pool_count() -> int:
+	return skins.size() - (0 if player_skin < 0 else 1)
+
+
 static func count() -> int:
 	return skins.size()
 
 
 static func get_skin(i: int) -> Dictionary:
+	if i < 0:
+		return default_skin()
 	if skins.is_empty():
 		return {}
 	return skins[clampi(i, 0, skins.size() - 1)]
@@ -150,19 +226,23 @@ static func set_of(s, idx: int) -> void:
 
 ## Deal the characters the player did not pick to the field.
 ##
-## The pool is every skin except `player_skin` (`count() - 1` entries), so 7 AI
-## and a 2P partner always fit with no duplicate while the player keeps his pick.
+## The pool is every skin except the player's real pick: `count()` entries for
+## **默认** (the procedural default is not in the table, so nothing is taken out
+## of the deal) and `count() - 1` for a specific character. 7 AI and a 2P partner
+## always fit with no duplicate either way (11 or 10 available for 8 snakes).
 ##
 ## `seed` makes the shuffle reproducible for a given round, so two runs of the
 ## same round show the same snakes (the A/B capture harness relies on it). Every
-## visible snake gets a different character; the player always keeps his pick.
+## visible snake gets a different character; a player on **默认** keeps `-1`,
+## i.e. the procedural web-original look.
 static func assign_round(snakes: Array, seed_value: int) -> void:
 	var n := skins.size()
 	if n == 0:
 		return
+	var pick: int = player_skin if player_skin >= 0 and player_skin < n else -1
 	var pool: Array = []
 	for i in n:
-		if i != player_skin:
+		if i != pick:
 			pool.append(i)
 	# Fisher-Yates over a deterministic LCG, independent of the core's RNG.
 	var st := (seed_value ^ 0x9E3779B9) & 0xFFFFFFFF
@@ -178,7 +258,7 @@ static func assign_round(snakes: Array, seed_value: int) -> void:
 	for s in snakes:
 		if s.is_player:
 			if int(s.player_index) == 0:
-				set_of(s, player_skin)
+				set_of(s, pick)
 			else:
 				# 2P: the second human gets the first non-picked character.
 				set_of(s, int(pool[cursor % pool.size()]))
@@ -193,37 +273,63 @@ static func assign_one(s, idx: int) -> void:
 
 
 # ----------------------------------------------------------------- settings
-
-static func load_settings() -> void:
-	if _settings_loaded or skins.is_empty():
+## Restore the player's pick from `[skin] player`:
+##
+##     missing file / missing key / "" / "!default"  -> 默认 (-1)
+##     "A1_spicy" ... "C1_panda"                     -> that character's index
+##     anything else (unknown slug)                  -> 默认 (-1)
+##
+## A fresh install and an explicit 默认 are therefore the same state, and an old
+## save written before this entry existed (`player="B5_diva"`) still loads as
+## that character. `force` re-reads the file (verification probes only:
+## `prepare()` and every normal boot call it once).
+static func load_settings(force: bool = false) -> void:
+	if (not force and _settings_loaded) or skins.is_empty():
 		return
 	_settings_loaded = true
+	player_skin = -1
 	var cfg := ConfigFile.new()
 	if cfg.load(SETTINGS_PATH) != OK:
 		return
-	var slug := String(cfg.get_value("skin", "player", ""))
+	var slug := String(cfg.get_value("skin", "player", DEFAULT_SLUG)).strip_edges()
+	if slug == "" or slug == DEFAULT_SLUG:
+		return
 	var idx := index_of_slug(slug)
-	if idx >= 0:
-		player_skin = idx
+	player_skin = idx
 
 
+## `!default` for **默认**, the character's slug otherwise. The file is loaded
+## first so the sections owned by `ps_settings.gd` are preserved.
 static func save_settings() -> void:
 	if skins.is_empty():
 		return
 	var cfg := ConfigFile.new()
-	# Keep whatever else the file may hold (future settings) instead of
-	# clobbering it: load first, then set our key.
 	cfg.load(SETTINGS_PATH)
-	cfg.set_value("skin", "player", String(get_skin(player_skin)["slug"]))
+	cfg.set_value("skin", "player",
+		DEFAULT_SLUG if player_skin < 0 else String(get_skin(player_skin)["slug"]))
 	cfg.save(SETTINGS_PATH)
 
 
+## `idx` is an index into `skins`, or `-1` for **默认**. Persisted immediately,
+## so the choice survives a restart (and a fresh install starts on 默认).
 static func set_player_skin(idx: int) -> void:
-	player_skin = clampi(idx, 0, maxi(0, skins.size() - 1))
+	player_skin = -1 if idx < 0 else clampi(idx, 0, maxi(0, skins.size() - 1))
 	save_settings()
 
 
+## One step around the picker:
+##   默认 -> skins[0] -> skins[1] -> ... -> skins[n-1] -> 默认
+## LEFT from the first character lands on 默认; RIGHT from the last character
+## wraps to it. The virtual entry is position 0, so the modulo is over `n + 1`.
 static func step_player_skin(dir: int) -> void:
-	if skins.is_empty():
+	var n := skins.size()
+	if n == 0:
 		return
-	set_player_skin((player_skin + dir + skins.size()) % skins.size())
+	set_player_skin((player_skin + 1 + dir + n + 1) % (n + 1) - 1)
+
+
+## One-line pick summary for logs and probes: `默认 (!default)` or
+## `下午茶蛇 (B5_diva)`.
+static func describe_pick() -> String:
+	return "%s (%s)" % [name_of(player_skin),
+		String(get_skin(player_skin).get("slug", "?"))]

@@ -148,6 +148,9 @@ var phase: StringName = &"mode_select"
 var diag := {
 	"layout": "coco18", "hand": "-", "dist_n": 0.0, "angle": 0.0,
 	"torso": 0.0, "conf": 0.0, "reason": "", "slot0": false, "slot1": false,
+	## `spd_n` = the distance the SPEED curve consumed (the more extended arm,
+	## 2026-11-17); `dist_n` above stays the right-arm steering distance.
+	"spd_n": -1.0,
 	## `ref` = the steering reference joint in use ("shoulder_r" / "chest"),
 	## `kp` = its index in the active layout (-1 for the interpolated chest).
 	## Printed by main.gd's `[pose]` line so a device log proves which joint steers.
@@ -922,11 +925,19 @@ func _process_slot(slot: int, box: Dictionary, imgw: float, imgh: float, now: fl
 	slot_hand_up[slot] = r_up or l_up
 	# RIGHT wrist around the RIGHT shoulder. `pose.ref_joint=&"chest"` only moves
 	# the origin (previous pass); the wrist is the right one either way.
-	mappers[slot].update_wrist(_xy(rw), ref_xy, torso, now, steers[slot])
+	# 2026-11-17 (owner: 左/上伸手偏慢): the LEFT arm is handed over too, but only
+	# as the SPEED distance (`max(|rwr-rsh|, |lwr-lsh|) / torso`). Steering stays
+	# right-arm fixed; the left arm is ignored when its wrist is below
+	# `pose.min_visibility`, and the mapper itself drops a passive hanging arm.
+	var has_left: bool = lw.z >= min_vis
+	mappers[slot].update_wrist(_xy(rw), ref_xy, torso, now, steers[slot],
+		_xy(lw) if has_left else null, _xy(lsho) if has_left else null,
+		rw.z, lw.z)
 	diag["ref"] = String(cfg.pose.ref_joint)
 	diag["kp"] = ref_kp
 	diag["hand"] = "right" if pick == 0 else "left"
 	diag["dist_n"] = mappers[slot].last_dist_n
+	diag["spd_n"] = mappers[slot].last_speed_dist_n
 	diag["angle"] = steers[slot].steer_angle_rad
 	diag["torso"] = torso
 	# The published angle is HELD by two independent gates: the wrist dead zone

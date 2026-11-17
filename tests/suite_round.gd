@@ -201,6 +201,95 @@ static func run(t) -> void:
 	t.eq_int("restart clears the settlement", game.ranking.size(), 0)
 	t.ok("restart clears the result", game.round_result == null)
 
+	# ---- respawn inset (2026-11-17, owner: 复活点不要贴着墙) ----------------
+	# Every respawn must land inside the half-a-screen inset, keep the existing
+	# clearance to every living snake head, and stay deterministic. 40 real
+	# `respawn_player()` calls on one game (the AI never respawns here: no
+	# update runs, so their heads are static and the clearance is exact).
+	game = _new_game(411)
+	game.start()
+	var inset: Vector2 = game.cfg.player.respawn_inset
+	var w: float = game.cfg.world.w
+	var h: float = game.cfg.world.h
+	var inside_n := 0
+	var clear_min := 1.0e18
+	var border_min := Vector2(1.0e18, 1.0e18)
+	var pts_a: Array = []
+	var k2 := 0
+	while k2 < 40:
+		game.kill_snake(game.player, null)
+		game.respawn_player()
+		var hd: Vector2 = game.player.body[0]
+		pts_a.append(hd)
+		if hd.x >= inset.x and hd.x <= w - inset.x \
+				and hd.y >= inset.y and hd.y <= h - inset.y:
+			inside_n += 1
+		border_min.x = minf(border_min.x, minf(hd.x, w - hd.x))
+		border_min.y = minf(border_min.y, minf(hd.y, h - hd.y))
+		var i2 := 0
+		while i2 < game.snakes.size():
+			var s2 = game.snakes[i2]
+			i2 += 1
+			if s2 == game.player or not s2.alive or s2.body.size() == 0:
+				continue
+			clear_min = minf(clear_min, hd.distance_to(s2.body[0]))
+		k2 += 1
+	t.eq_int("40 respawns all land inside the half-screen inset", inside_n, 40)
+	t.ge("...and keep the human clearance", clear_min,
+		game.cfg.player.respawn_clear_human)
+	t.ok("...with at least half a screen to every border",
+		border_min.x >= inset.x and border_min.y >= inset.y,
+		"border=%s inset=%s" % [str(border_min), str(inset)])
+	# Same seed -> the identical respawn sequence (the fixed rng stream).
+	var game_b = _new_game(411)
+	game_b.start()
+	var same_seq := true
+	k2 = 0
+	while k2 < 40:
+		game_b.kill_snake(game_b.player, null)
+		game_b.respawn_player()
+		if game_b.player.body[0] != pts_a[k2]:
+			same_seq = false
+		k2 += 1
+	t.ok("respawn points are deterministic for the same seed", same_seq)
+	# Fallback 1: the preferred centre is blocked but the inset still holds a
+	# safe point -> the closest safe point INSIDE the inset is used.
+	var fcfg = PSConfig.new()
+	var ftuning = PSRuntimeTuning.new(fcfg)
+	var fg = PSGame.new(fcfg, ftuning, 412)
+	fg.start()
+	var blocker = fg.snakes[1]
+	blocker.alive = true
+	blocker.body.resize(1)
+	blocker.body[0] = Vector2(2400.0, 1350.0)
+	fcfg.player.respawn_inset = Vector2(fcfg.world.w * 0.5 - 1400.0,
+		fcfg.world.h * 0.5 - 1100.0)
+	var p_in: Vector2 = fg.respawn_point(fcfg.player.respawn_clear_human,
+		Vector2(2400.0, 1350.0))
+	t.eq_str("blocked preferred candidates -> closest safe inset point",
+		fg.respawn_note, "inset-fallback")
+	var in_inset: bool = p_in.x >= fcfg.player.respawn_inset.x \
+		and p_in.x <= fcfg.world.w - fcfg.player.respawn_inset.x \
+		and p_in.y >= fcfg.player.respawn_inset.y \
+		and p_in.y <= fcfg.world.h - fcfg.player.respawn_inset.y
+	t.ok("...that point is inside the inset and clear of the blocker",
+		in_inset and p_in.distance_to(Vector2(2400.0, 1350.0))
+			>= fcfg.player.respawn_clear_human)
+	# Fallback 2: the WHOLE inset is blocked (a 120x120 box around a blocker) ->
+	# the closest safe point OUTSIDE the inset, with the reason recorded.
+	fcfg.player.respawn_inset = Vector2(fcfg.world.w * 0.5 - 60.0,
+		fcfg.world.h * 0.5 - 60.0)
+	var p_out: Vector2 = fg.respawn_point(fcfg.player.respawn_clear_human,
+		Vector2(2400.0, 1350.0))
+	t.eq_str("whole inset blocked -> world fallback", fg.respawn_note, "world-fallback")
+	var outside: bool = p_out.x < fcfg.player.respawn_inset.x \
+		or p_out.x > fcfg.world.w - fcfg.player.respawn_inset.x \
+		or p_out.y < fcfg.player.respawn_inset.y \
+		or p_out.y > fcfg.world.h - fcfg.player.respawn_inset.y
+	t.ok("...the fallback is outside the blocked inset, safe and logged",
+		outside and p_out.distance_to(Vector2(2400.0, 1350.0))
+			>= fcfg.player.respawn_clear_human)
+
 	t.end_suite()
 
 

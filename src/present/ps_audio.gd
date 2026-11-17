@@ -25,6 +25,18 @@ var _streams: Dictionary = {}
 var _next := 0
 var _host: Node = null
 
+## ---- firing counters (diagnostics, `--capture-sfx` only) -------------------
+## `req_*` counts every `play()` CALL the presentation made: that is the routing
+## decision, and it is visible even in a `--headless` run where no audio bus
+## exists. `played_*` counts the calls that actually reached a player, i.e. after
+## the enabled/muted guard - the mute check in the harness reads it.
+## Density is quoted from `req_*`, because on the box (unmuted, bus present) the
+## two are the same number.
+var req_total := 0
+var played_total := 0
+var req_by_name: Dictionary = {}
+var played_by_name: Dictionary = {}
+
 
 func build(host: Node, volume_db: float = -8.0) -> void:
 	_host = host
@@ -57,16 +69,36 @@ func set_muted(on: bool) -> void:
 
 
 func play(name: StringName, pitch: float = 1.0) -> void:
+	# Count the REQUEST before any guard: the density probe measures the routing,
+	# which must be identical whether or not this host has an audio bus.
+	var key := String(name)
+	req_total += 1
+	req_by_name[key] = int(req_by_name.get(key, 0)) + 1
 	if not enabled or muted or _players.is_empty():
 		return
 	var st: AudioStreamWAV = _streams.get(name, null)
 	if st == null:
 		return
+	played_total += 1
+	played_by_name[key] = int(played_by_name.get(key, 0)) + 1
 	var p: AudioStreamPlayer = _players[_next]
 	_next = (_next + 1) % _players.size()
 	p.stream = st
 	p.pitch_scale = clampf(pitch, 0.6, 1.6)
 	p.play()
+
+
+## `eat=12 big=1 pickup=3 ... total=17` - the `[sfx]` harness line's payload.
+## `by_played` quotes the true output (0 for every name on a headless run).
+func counts_text(by_played: bool = false) -> String:
+	var d: Dictionary = played_by_name if by_played else req_by_name
+	var keys: Array = d.keys()
+	keys.sort()
+	var parts: Array = []
+	for k in keys:
+		parts.append("%s=%d" % [String(k), int(d[k])])
+	parts.append("total=%d" % (played_total if by_played else req_total))
+	return " ".join(parts)
 
 
 ## One decaying sine sweep with optional noise, written straight into PCM16.
